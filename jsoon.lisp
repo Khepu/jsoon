@@ -31,7 +31,7 @@ Best not used with negative input."
   (declare (type string string)
            (type fixnum index)
            (type character pad-character))
-  (let ((chunk (make-array '(32) :element-type '(signed-byte 8))))
+  (let ((chunk (make-array (list +chunk-length+) :element-type '(signed-byte 8))))
     (declare (type (array (signed-byte 8) 1) chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
                                   (- (length string) index))
@@ -40,7 +40,7 @@ Best not used with negative input."
           do (setf (aref chunk i) character)
           finally (when pad-character
                     (loop with pad-value = (char-code pad-character)
-                          for pad from upper-limit below 32
+                          for pad from upper-limit below +chunk-length+
                           do (setf (aref chunk pad) pad-value))))
     chunk))
 
