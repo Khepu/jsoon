@@ -48,6 +48,8 @@ Best not used with negative input."
   "Skips to the first non-whitespace character."
   (declare (type string string)
            (type fixnum index))
+  ;; NOTE: Padding with a matching character to make detection of chunks with
+  ;; just whitespace easier when they are less than `+chunk-length+'.
   (let* ((chunk (chunk string index #\space))
          (chunk (sb-simd-avx2:s8.32-aref chunk 0))
          (space-mask   (sb-simd-avx2:s8.32/= chunk +space+))
@@ -56,8 +58,8 @@ Best not used with negative input."
          (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
                                                   tab-mask
                                                   newline-mask))
+         ;; NOTE: The produced mask is backwards
          (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-    ;; If everything is whitespace
     (if (zerop whitespace-bitmap)
         (values nil 0)
         (values (+ index
