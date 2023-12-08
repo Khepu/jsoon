@@ -83,14 +83,19 @@ Best not used with negative input."
 ;; Tests
 ;;
 
-(fiveam:def-suite :jsoon-tests)
+(5am:def-suite :jsoon-tests)
 
-(fiveam:test :test-rightmost-set-bit
-  (fiveam:is (eql 0 (rightmost-set-bit #b1)))
-  (fiveam:is (eql 2 (rightmost-set-bit #b100)))
-  (fiveam:is (eql 2 (rightmost-set-bit #b11011100))))
+(5am:test :test-rightmost-set-bit
+  (5am:is (eql 0 (rightmost-set-bit #b1)))
+  (5am:is (eql 2 (rightmost-set-bit #b100)))
+  (5am:is (eql 2 (rightmost-set-bit #b11011100))))
 
-(fiveam:test :test-skip-whitespace
-  (fiveam:is (equal '(nil 0)
-                    (skip-whitespace "a" 0)))
-  )
+(5am:test :test-skip-whitespace
+  (5am:is (equal '(0 #b1)
+                 (multiple-value-list (skip-whitespace "a" 0))))
+  (5am:is (equal '(nil #b0)
+                 (multiple-value-list (skip-whitespace " " 0)))
+          "No non-whitespace characters found")
+  (5am:is (equal '(2 #b100)
+                 (multiple-value-list (skip-whitespace "  a   " 0)))
+          "Bitmask is reversed & leading zeroes are ommitted."))
