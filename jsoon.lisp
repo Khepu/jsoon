@@ -80,6 +80,45 @@ Best not used with negative input."
         until new-index
         finally (return new-index)))
 
+(defun %parse-object (string index)
+  (declare (type string string)
+           (type fixnum index))
+  ;; parse a string
+  ;; next char should be ':'
+  ;; parse recursively
+  ;; do for all attributes
+  ;; find matching }
+  )
+
+(defun %parse-array (string index)
+  ;; recursively parse
+  ;; if a ',' follows then repeat
+  ;; if a ']' follows then stop
+  )
+
+(defun %parse-string (string index)
+  ;; parse until next '"'
+  ;; remember to handle escaped characters and UTF-16 surrogates
+  )
+
+(defun %parse-number (string index)
+  ;; parse until the next space
+  ;; if a '.' is included then it's a real, otherwise integer
+  )
+
+(defun prase (string &optional (index 0))
+  (declare (type string string))
+  (let* ((index (skip-to-next-character string index))
+         (character (char string index)))
+    (cond
+      ((eql character #\{)      (%parse-object string index))
+      ((eql character #\[)      (%parse-array string index))
+      ((eql character #\")      (%parse-string string index))
+      ((digit-char-p character) (%parse-number string index))
+      (t (error "Failed to parse JSON at position '~a': Unexpected character '~a'"
+                index
+                character)))))
+
 ;;
 ;; Tests
 ;;
