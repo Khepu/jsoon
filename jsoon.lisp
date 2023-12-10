@@ -48,9 +48,10 @@ Best not used with negative input."
   "Skips to the first non-whitespace character."
   (declare (type string string)
            (type fixnum index))
-  ;; NOTE: Padding with a matching character to make detection of chunks with
-  ;; just whitespace easier when they are less than `+chunk-length+'.
+  ;; NOTE: Padding with a spaces to make detection of chunks with just
+  ;; whitespace easier when they are less than `+chunk-length+'.
   (let* ((chunk (chunk string index #\space))
+         ;; NOTE: Packing here instead of inside `chunk' to avoid pointer coercion
          (chunk (sb-simd-avx2:s8.32-aref chunk 0))
          (space-mask   (sb-simd-avx2:s8.32/= chunk +space+))
          (tab-mask     (sb-simd-avx2:s8.32/= chunk +tab+))
