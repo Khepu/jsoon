@@ -111,10 +111,11 @@ Best not used with negative input."
   (let* ((index (skip-to-next-character string index))
          (character (char string index)))
     (cond
-      ((eql character #\{)      (%parse-object string index))
-      ((eql character #\[)      (%parse-array string index))
-      ((eql character #\")      (%parse-string string index))
-      ((digit-char-p character) (%parse-number string index))
+      ((eql character #\{)          (%parse-object string index))
+      ((eql character #\[)          (%parse-array string index))
+      ((eql character #\")          (%parse-string string index))
+      ((or (digit-char-p character)
+           (eql charachter #\-))    (%parse-number string index))
       (t (error "Failed to parse JSON at position '~a': Unexpected character '~a'"
                 index
                 character)))))
