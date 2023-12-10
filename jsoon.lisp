@@ -38,7 +38,7 @@ Best not used with negative input."
           for i from index below upper-limit
           for character = (char-code (char string i))
           do (setf (aref chunk i) character)
-          finally (when pad-character
+          finally (unless (eql pad-character #\Nul)
                     (loop with pad-value = (char-code pad-character)
                           for pad from upper-limit below +chunk-length+
                           do (setf (aref chunk pad) pad-value))))
