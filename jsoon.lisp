@@ -15,26 +15,37 @@
 
 (defconstant +chunk-length+ 32)
 
-(defconstant +space+   (sb-simd-avx2:s8.32 (char-code #\space)))
-(defconstant +tab+     (sb-simd-avx2:s8.32 (char-code #\tab)))
-(defconstant +newline+ (sb-simd-avx2:s8.32 (char-code #\newline)))
+(defconstant +space+        (sb-simd-avx2:s8.32 (char-code #\space)))
+(defconstant +tab+          (sb-simd-avx2:s8.32 (char-code #\tab)))
+(defconstant +newline+      (sb-simd-avx2:s8.32 (char-code #\newline)))
+(defconstant +double-quote+ (sb-simd-avx2:s8.32 (char-code #\")))
+(defconstant +backslash+    (sb-simd-avx2:s8.32 (char-code #\\)))
 
-(defun rightmost-set-bit (n)
-  "Returns a 0-based index of the location of the rightmost set bit of `n'.
-Best not used with negative input."
+(defun rightmost-bit (n)
+  (declare (type fixnum n)
+           (optimize (speed 3) (safety 1)))
+  (logand (1+ (lognot n))
+          n))
+
+(defun rightmost-bit-index (n)
+  "Returns a 0-based index of the location of the rightmost set bit of `n'."
   (declare (type fixnum n))
-  (let ((rightmost-bit (logand (1+ (lognot n))
-                               n)))
-    (truncate (log rightmost-bit 2))))
+  (truncate (log (rightmost-bit n) 2)))
 
-(defun chunk (string index &optional (pad-character #\Nul))
+(defun unset-rightmost-bit (n)
+  (declare (type fixnum n))
+  (logxor n (rightmost-bit n)))
+
+(defun chunk (string index &optional (pad-character #\Nul) cutoff)
   (declare (type string string)
            (type fixnum index)
            (type character pad-character))
   (let ((chunk (make-array (list +chunk-length+) :element-type '(signed-byte 8))))
     (declare (type (array (signed-byte 8) 1) chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
-                                  (- (length string) index))
+                                  (if cutoff
+                                      (+ index cutoff)
+                                      (- (length string) index)))
           for i from index below upper-limit
           for character = (char-code (char string i))
           do (setf (aref chunk i) character)
@@ -43,6 +54,7 @@ Best not used with negative input."
                           for pad from upper-limit below +chunk-length+
                           do (setf (aref chunk pad) pad-value))))
     chunk))
+
 
 (defun skip-whitespace (string index)
   "Skips to the first non-whitespace character."
@@ -56,6 +68,8 @@ Best not used with negative input."
          (space-mask   (sb-simd-avx2:s8.32/= chunk +space+))
          (tab-mask     (sb-simd-avx2:s8.32/= chunk +tab+))
          (newline-mask (sb-simd-avx2:s8.32/= chunk +newline+))
+         ;; NOTE: Equality checks with simd will produce unsigned results of the
+         ;; same length
          (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
                                                   tab-mask
                                                   newline-mask))
@@ -64,7 +78,7 @@ Best not used with negative input."
     (if (zerop whitespace-bitmap)
         (values nil 0)
         (values (+ index
-                   (rightmost-set-bit whitespace-bitmap))
+                   (rightmost-bit-index whitespace-bitmap))
                 whitespace-bitmap))))
 
 (defun skip-to-next-character (string index)
@@ -80,6 +94,52 @@ Best not used with negative input."
         until new-index
         finally (return new-index)))
 
+(defun %parse-string (string index)
+  (declare (type string string)
+           (type fixnum index))
+  (with-output-to-string (parsed-string)
+    (loop with current-index = (1+ index)
+          do (let* ((chunk (chunk string current-index))
+                    (chunk (sb-simd-avx2:s8.32-aref chunk 0))
+                    (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
+                    (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
+                    (next-double-quote (unless (zerop double-quote-bitmap)
+                                         (rightmost-bit-index double-quote-bitmap)))
+
+                    (backslash-mask   (sb-simd-avx2:s8.32= chunk +backslash+))
+                    (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
+                    (next-backslash (unless (zerop backslash-bitmap)
+                                      (rightmost-bit-index backslash-bitmap))))
+               (cond
+                 ;; The end of the string is known and no escaping is needed
+                 ((and next-double-quote (or (not next-backslash)
+                                             (< next-double-quote next-backslash)))
+                  (write-string (subseq string current-index
+                                               (+ current-index next-double-quote)))
+                  (return))
+                 ;; no string delimiter found and nothing to unescape, move forward
+                 ((and (not next-double-quote) (not next-backslash))
+                  (incf current-index +chunk-length+))
+
+                 ;; loop through all marked escaped characters and unescape them
+                 ((> next-double-quote next-backslash)
+                  (loop with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
+                        with local-backslash-bitmap = backslash-bitmap
+                        with local-next-backslash = next-backslash
+                        while (and local-next-backslash
+                                   (> next-double-quote local-next-backslash))
+                        for backslash-index = (+ frozen-index local-next-backslash)
+                        ;; for escaped-char = (char string backslash-index)
+                        for unescaped-char = (%unescape-char string backslash-index)
+                        do (progn
+                             (write-string (subseq string current-index backslash-index))
+                             (write-char unescaped-char)
+                             ;; set the index past the escaped character
+                             (setf current-index (+ backslash-index 2) ;; skip step is wrong
+                                   local-backslash-bitmap (unset-rightmost-bit local-backslash-bitmap)
+                                   local-next-backslash (unless (zerop local-backslash-bitmap)
+                                                          (rightmost-bit-index local-backslash-bitmap)))))))))))
+
 (defun %parse-object (string index)
   (declare (type string string)
            (type fixnum index))
@@ -94,11 +154,6 @@ Best not used with negative input."
   ;; recursively parse
   ;; if a ',' follows then repeat
   ;; if a ']' follows then stop
-  )
-
-(defun %parse-string (string index)
-  ;; parse until next '"'
-  ;; remember to handle escaped characters and UTF-16 surrogates
   )
 
 (defun %parse-number (string index)
@@ -126,10 +181,10 @@ Best not used with negative input."
 
 (5am:def-suite :jsoon-tests)
 
-(5am:test :test-rightmost-set-bit
-  (5am:is (eql 0 (rightmost-set-bit #b1)))
-  (5am:is (eql 2 (rightmost-set-bit #b100)))
-  (5am:is (eql 2 (rightmost-set-bit #b11011100))))
+(5am:test :test-rightmost-bit-index
+  (5am:is (eql 0 (rightmost-bit-index #b1)))
+  (5am:is (eql 2 (rightmost-bit-index #b100)))
+  (5am:is (eql 2 (rightmost-bit-index #b11011100))))
 
 (5am:test :test-skip-whitespace
   (5am:is (equal '(0 #b1)
