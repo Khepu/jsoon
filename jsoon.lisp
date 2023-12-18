@@ -127,7 +127,7 @@ first character after the escaped sequence."
            (type fixnum index)
            (optimize (speed 3) (safety 1)))
   (with-output-to-string (parsed-string)
-    (loop with current-index = (the fixnum (1+ index))
+    (loop with current-index = (incf index)
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
