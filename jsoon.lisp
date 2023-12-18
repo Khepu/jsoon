@@ -36,25 +36,23 @@
   (declare (type fixnum n))
   (logxor n (rightmost-bit n)))
 
-(defun chunk (string index &optional (pad-character #\Nul) cutoff)
+(defun chunk (string index &optional (pad-character #\Nul))
   (declare (type string string)
            (type fixnum index)
            (type character pad-character))
   (let ((chunk (make-array (list +chunk-length+) :element-type '(signed-byte 8))))
     (declare (type (array (signed-byte 8) 1) chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
-                                  (if cutoff
-                                      (+ index cutoff)
-                                      (- (length string) index)))
-          for i from index below upper-limit
+                                  (- (length string) index))
+          for i from index upto upper-limit
+          for j from 0
           for character = (char-code (char string i))
-          do (setf (aref chunk i) character)
+          do (setf (aref chunk j) character)
           finally (unless (eql pad-character #\Nul)
                     (loop with pad-value = (char-code pad-character)
                           for pad from upper-limit below +chunk-length+
                           do (setf (aref chunk pad) pad-value))))
     chunk))
-
 
 (defun skip-whitespace (string index)
   "Skips to the first non-whitespace character."
@@ -94,6 +92,27 @@
         until new-index
         finally (return new-index)))
 
+(defun %unescape-char (out string index)
+  "Write the unescaped character to `out' and return an index pointing at the
+first character after the escaped sequence."
+  (declare (type string string)
+           (type fixnum index))
+  (let ((escaped-character (char string (1+ index))))
+
+    (case escaped-character
+      (#\n (prog1 (+ index 2)
+             (write-char #\linefeed out)))
+      (#\f (prog1 (+ index 2)
+             (write-char #\linefeed out)))
+      (#\b (prog1 (+ index 2)
+             (write-char #\backspace out)))
+      (#\r (prog1 (+ index 2)
+             (write-char #\return out)))
+      (#\t (prog1 (+ index 2)
+             (write-char #\tab out)))
+      (#\u (error "Not supported"))
+      (t (1+ index)))))
+
 (defun %parse-string (string index)
   (declare (type string string)
            (type fixnum index))
@@ -110,12 +129,19 @@
                     (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                     (next-backslash (unless (zerop backslash-bitmap)
                                       (rightmost-bit-index backslash-bitmap))))
+               ;; (print "--------------------------------------------------")
+               ;; (print (format nil "double-quote-mask: ~a" chunk))
+               ;; (print (format nil "double-quote-bitmap: ~a" double-quote-bitmap))
+               ;; (print (format nil "next-double-quote: ~a" next-double-quote))
+               ;; (print (format nil "backslash-bitmap: ~a" backslash-bitmap))
+               ;; (print (format nil "next-backslash: ~a" next-backslash))
                (cond
-                 ;; The end of the string is known and no escaping is needed
+                 ;; the end of the string is known and no escaping is needed
                  ((and next-double-quote (or (not next-backslash)
                                              (< next-double-quote next-backslash)))
                   (write-string (subseq string current-index
-                                               (+ current-index next-double-quote)))
+                                        (+ current-index next-double-quote))
+                                parsed-string)
                   (return))
                  ;; no string delimiter found and nothing to unescape, move forward
                  ((and (not next-double-quote) (not next-backslash))
@@ -124,21 +150,21 @@
                  ;; loop through all marked escaped characters and unescape them
                  ((> next-double-quote next-backslash)
                   (loop with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
-                        with local-backslash-bitmap = backslash-bitmap
-                        with local-next-backslash = next-backslash
-                        while (and local-next-backslash
-                                   (> next-double-quote local-next-backslash))
-                        for backslash-index = (+ frozen-index local-next-backslash)
-                        ;; for escaped-char = (char string backslash-index)
-                        for unescaped-char = (%unescape-char string backslash-index)
-                        do (progn
-                             (write-string (subseq string current-index backslash-index))
-                             (write-char unescaped-char)
-                             ;; set the index past the escaped character
-                             (setf current-index (+ backslash-index 2) ;; skip step is wrong
-                                   local-backslash-bitmap (unset-rightmost-bit local-backslash-bitmap)
-                                   local-next-backslash (unless (zerop local-backslash-bitmap)
-                                                          (rightmost-bit-index local-backslash-bitmap)))))))))))
+                        while (and next-backslash
+                                   (> next-double-quote next-backslash))
+                        for backslash-index = (+ frozen-index next-backslash)
+                        unless (eql current-index backslash-index)
+                          do (write-string (subseq string current-index backslash-index)
+                                           parsed-string)
+                        do (setf current-index    (%unescape-char parsed-string string backslash-index)
+                                 backslash-bitmap (unset-rightmost-bit backslash-bitmap)
+                                 next-backslash   (unless (zerop backslash-bitmap)
+                                                    (rightmost-bit-index backslash-bitmap)))
+                        finally (let ((next-index (+ frozen-index next-double-quote)))
+                                  (write-string (subseq string current-index next-index)
+                                                parsed-string)
+                                  (setf current-index (1+ next-index))))
+                  (return)))))))
 
 (defun %parse-object (string index)
   (declare (type string string)
