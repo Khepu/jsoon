@@ -21,6 +21,11 @@
 (defconstant +double-quote+ (sb-simd-avx2:s8.32 (char-code #\")))
 (defconstant +backslash+    (sb-simd-avx2:s8.32 (char-code #\\)))
 
+(deftype string-chunk ()
+  `(array (signed-byte 8) (,+chunk-length+)))
+
+(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char))
+
 (defun rightmost-bit (n)
   (declare (type fixnum n)
            (optimize (speed 3) (safety 1)))
@@ -29,19 +34,23 @@
 
 (defun rightmost-bit-index (n)
   "Returns a 0-based index of the location of the rightmost set bit of `n'."
-  (declare (type fixnum n))
-  (truncate (log (rightmost-bit n) 2)))
+  (declare (type fixnum n)
+           (optimize (speed 3) (safety 1)))
+  (truncate (coerce (log (rightmost-bit n) 2)
+                    'single-float)))
 
 (defun unset-rightmost-bit (n)
-  (declare (type fixnum n))
-  (logxor n (rightmost-bit n)))
+  (declare (type fixnum n)
+           (optimize (speed 3) (safety 1)))
+  (the fixnum (logxor n (rightmost-bit n))))
 
 (defun chunk (string index &optional (pad-character #\Nul))
-  (declare (type string string)
+  (declare (type simple-string string)
            (type fixnum index)
-           (type character pad-character))
+           (type character pad-character)
+           (optimize (speed 3) (safety 1)))
   (let ((chunk (make-array (list +chunk-length+) :element-type '(signed-byte 8))))
-    (declare (type (array (signed-byte 8) 1) chunk))
+    (declare (type string-chunk chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
                                   (- (length string) index))
           for i from index upto upper-limit
@@ -56,7 +65,7 @@
 
 (defun skip-whitespace (string index)
   "Skips to the first non-whitespace character."
-  (declare (type string string)
+  (declare (type simple-string string)
            (type fixnum index))
   ;; NOTE: Padding with a spaces to make detection of chunks with just
   ;; whitespace easier when they are less than `+chunk-length+'.
@@ -80,7 +89,7 @@
                 whitespace-bitmap))))
 
 (defun skip-to-next-character (string index)
-  (declare (type string string)
+  (declare (type simple-string string)
            (type fixnum index))
   (loop with current-index = index
         with new-index
@@ -95,29 +104,30 @@
 (defun %unescape-char (out string index)
   "Write the unescaped character to `out' and return an index pointing at the
 first character after the escaped sequence."
-  (declare (type string string)
-           (type fixnum index))
+  (declare (type simple-string string)
+           (type fixnum index)
+           (optimize (speed 3) (safety 1)))
   (let ((escaped-character (char string (1+ index))))
-
     (case escaped-character
-      (#\n (prog1 (+ index 2)
+      (#\n (prog1 (incf index 2)
              (write-char #\linefeed out)))
-      (#\f (prog1 (+ index 2)
+      (#\f (prog1 (incf index 2)
              (write-char #\linefeed out)))
-      (#\b (prog1 (+ index 2)
+      (#\b (prog1 (incf index 2)
              (write-char #\backspace out)))
-      (#\r (prog1 (+ index 2)
+      (#\r (prog1 (incf index 2)
              (write-char #\return out)))
-      (#\t (prog1 (+ index 2)
+      (#\t (prog1 (incf index 2)
              (write-char #\tab out)))
       (#\u (error "Not supported"))
-      (t (1+ index)))))
+      (t (incf index)))))
 
 (defun %parse-string (string index)
-  (declare (type string string)
-           (type fixnum index))
+  (declare (type simple-string string)
+           (type fixnum index)
+           (optimize (speed 3) (safety 1)))
   (with-output-to-string (parsed-string)
-    (loop with current-index = (1+ index)
+    (loop with current-index = (the fixnum (1+ index))
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
@@ -129,19 +139,14 @@ first character after the escaped sequence."
                     (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                     (next-backslash (unless (zerop backslash-bitmap)
                                       (rightmost-bit-index backslash-bitmap))))
-               ;; (print "--------------------------------------------------")
-               ;; (print (format nil "double-quote-mask: ~a" chunk))
-               ;; (print (format nil "double-quote-bitmap: ~a" double-quote-bitmap))
-               ;; (print (format nil "next-double-quote: ~a" next-double-quote))
-               ;; (print (format nil "backslash-bitmap: ~a" backslash-bitmap))
-               ;; (print (format nil "next-backslash: ~a" next-backslash))
                (cond
                  ;; the end of the string is known and no escaping is needed
                  ((and next-double-quote (or (not next-backslash)
                                              (< next-double-quote next-backslash)))
-                  (write-string (subseq string current-index
-                                        (+ current-index next-double-quote))
-                                parsed-string)
+                  (write-string string
+                                parsed-string
+                                :start current-index
+                                :end (+ current-index next-double-quote))
                   (return))
                  ;; no string delimiter found and nothing to unescape, move forward
                  ((and (not next-double-quote) (not next-backslash))
@@ -154,20 +159,24 @@ first character after the escaped sequence."
                                    (> next-double-quote next-backslash))
                         for backslash-index = (+ frozen-index next-backslash)
                         unless (eql current-index backslash-index)
-                          do (write-string (subseq string current-index backslash-index)
-                                           parsed-string)
+                          do (write-string string
+                                           parsed-string
+                                           :start current-index
+                                           :end backslash-index)
                         do (setf current-index    (%unescape-char parsed-string string backslash-index)
                                  backslash-bitmap (unset-rightmost-bit backslash-bitmap)
                                  next-backslash   (unless (zerop backslash-bitmap)
                                                     (rightmost-bit-index backslash-bitmap)))
-                        finally (let ((next-index (+ frozen-index next-double-quote)))
-                                  (write-string (subseq string current-index next-index)
-                                                parsed-string)
-                                  (setf current-index (1+ next-index))))
+                        finally (let ((end-of-string (+ frozen-index next-double-quote)))
+                                  (write-string string
+                                                parsed-string
+                                                :start current-index
+                                                :end end-of-string)
+                                  (setf current-index (1+ end-of-string))))
                   (return)))))))
 
 (defun %parse-object (string index)
-  (declare (type string string)
+  (declare (type simple-string string)
            (type fixnum index))
   ;; parse a string
   ;; next char should be ':'
@@ -187,8 +196,8 @@ first character after the escaped sequence."
   ;; if a '.' is included then it's a real, otherwise integer
   )
 
-(defun prase (string &optional (index 0))
-  (declare (type string string))
+(defun parse (string &optional (index 0))
+  (declare (type simple-string string))
   (let* ((index (skip-to-next-character string index))
          (character (char string index)))
     (cond
@@ -196,7 +205,7 @@ first character after the escaped sequence."
       ((eql character #\[)          (%parse-array string index))
       ((eql character #\")          (%parse-string string index))
       ((or (digit-char-p character)
-           (eql charachter #\-))    (%parse-number string index))
+           (eql character #\-))    (%parse-number string index))
       (t (error "Failed to parse JSON at position '~a': Unexpected character '~a'"
                 index
                 character)))))
