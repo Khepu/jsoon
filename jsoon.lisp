@@ -52,8 +52,8 @@
   (let ((chunk (make-array (list +chunk-length+) :element-type '(signed-byte 8))))
     (declare (type string-chunk chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
-                                  (- (length string) index))
-          for i from index upto upper-limit
+                                  (length string))
+          for i from index below upper-limit
           for j from 0
           for character = (char-code (char string i))
           do (setf (aref chunk j) character)
@@ -67,20 +67,19 @@
   "Skips to the first non-whitespace character."
   (declare (type simple-string string)
            (type fixnum index))
-  ;; NOTE: Padding with a spaces to make detection of chunks with just
-  ;; whitespace easier when they are less than `+chunk-length+'.
+  ;; Padding with a spaces to make detection of chunks with just whitespace
+  ;; easier when they are less than `+chunk-length+'.
   (let* ((chunk (chunk string index #\space))
-         ;; NOTE: Packing here instead of inside `chunk' to avoid pointer coercion
+         ;; Packing here instead of inside `chunk' to avoid pointer coercion
          (chunk (sb-simd-avx2:s8.32-aref chunk 0))
          (space-mask   (sb-simd-avx2:s8.32/= chunk +space+))
          (tab-mask     (sb-simd-avx2:s8.32/= chunk +tab+))
          (newline-mask (sb-simd-avx2:s8.32/= chunk +newline+))
-         ;; NOTE: Equality checks with simd will produce unsigned results of the
-         ;; same length
+         ;; Equality checks with simd will produce unsigned results of the same length
          (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
                                                   tab-mask
                                                   newline-mask))
-         ;; NOTE: The produced mask is backwards
+         ;; The produced mask is backwards
          (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
     (if (zerop whitespace-bitmap)
         (values nil 0)
@@ -128,6 +127,8 @@ first character after the escaped sequence."
            (optimize (speed 3) (safety 1)))
   (with-output-to-string (parsed-string)
     (loop with current-index = (incf index)
+          with raw-string-length = (length string)
+          while (< current-index raw-string-length)
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
@@ -141,8 +142,9 @@ first character after the escaped sequence."
                                       (rightmost-bit-index backslash-bitmap))))
                (cond
                  ;; the end of the string is known and no escaping is needed
-                 ((and next-double-quote (or (not next-backslash)
-                                             (< next-double-quote next-backslash)))
+                 ((and next-double-quote
+                       (or (not next-backslash)
+                           (< next-double-quote next-backslash)))
                   (write-string string
                                 parsed-string
                                 :start current-index
@@ -151,12 +153,19 @@ first character after the escaped sequence."
                  ;; no string delimiter found and nothing to unescape, move forward
                  ((and (not next-double-quote) (not next-backslash))
                   (incf current-index +chunk-length+))
+                  (write-string string
+                                parsed-string
+                                :start current-index
+                                :end (incf current-index (min (- raw-string-length current-index)
+                                                              +chunk-length+)))
 
                  ;; loop through all marked escaped characters and unescape them
-                 ((> next-double-quote next-backslash)
+                 ((or (and (not next-double-quote) next-backslash)
+                      (> next-double-quote next-backslash))
                   (loop with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
+                        with boundary = (or next-double-quote (+ frozen-index +chunk-length+))
                         while (and next-backslash
-                                   (> next-double-quote next-backslash))
+                                   (< next-backslash boundary))
                         for backslash-index = (+ frozen-index next-backslash)
                         unless (eql current-index backslash-index)
                           do (write-string string
@@ -167,7 +176,7 @@ first character after the escaped sequence."
                                  backslash-bitmap (unset-rightmost-bit backslash-bitmap)
                                  next-backslash   (unless (zerop backslash-bitmap)
                                                     (rightmost-bit-index backslash-bitmap)))
-                        finally (let ((end-of-string (+ frozen-index next-double-quote)))
+                        finally (let ((end-of-string (+ frozen-index boundary)))
                                   (write-string string
                                                 parsed-string
                                                 :start current-index
