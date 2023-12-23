@@ -119,7 +119,8 @@ first character after the escaped sequence."
       (#\t (prog1 (incf index 2)
              (write-char #\tab out)))
       (#\u (error "Not supported"))
-      (t (incf index)))))
+      (t (prog1 (incf index 2)
+           (write-char escaped-character out))))))
 
 (defun %parse-string (string index)
   (declare (type simple-string string)
@@ -129,6 +130,7 @@ first character after the escaped sequence."
     (loop with current-index = (incf index)
           with raw-string-length = (length string)
           while (< current-index raw-string-length)
+          ;; NOTE: next- prefix essentially means offset
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
@@ -150,30 +152,41 @@ first character after the escaped sequence."
                                 :start current-index
                                 :end (+ current-index next-double-quote))
                   (return))
+
                  ;; no string delimiter found and nothing to unescape, move forward
                  ((and (not next-double-quote) (not next-backslash))
-                  (incf current-index +chunk-length+))
                   (write-string string
                                 parsed-string
                                 :start current-index
                                 :end (incf current-index (min (- raw-string-length current-index)
-                                                              +chunk-length+)))
+                                                              +chunk-length+))))
 
                  ;; loop through all marked escaped characters and unescape them
                  ((or (and (not next-double-quote) next-backslash)
                       (> next-double-quote next-backslash))
                   (loop with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
-                        with boundary = (or next-double-quote (+ frozen-index +chunk-length+))
-                        while (and next-backslash
-                                   (< next-backslash boundary))
+                        with boundary = (min (or next-double-quote +chunk-length+)
+                                             (- raw-string-length frozen-index))
+                        while (and next-backslash (< next-backslash boundary))
                         for backslash-index = (+ frozen-index next-backslash)
                         unless (eql current-index backslash-index)
                           do (write-string string
                                            parsed-string
                                            :start current-index
                                            :end backslash-index)
+                             ;; move to the next double-quote if we just escaped one
+                        when (eql 1 (- next-double-quote next-backslash))
+                          do (setf double-quote-bitmap (unset-rightmost-bit double-quote-bitmap)
+                                   next-double-quote (unless (zerop double-quote-bitmap)
+                                                       (rightmost-bit-index backslash-bitmap))
+                                   boundary (min (or next-double-quote +chunk-length+)
+                                                 (- raw-string-length frozen-index)))
+
                         do (setf current-index    (%unescape-char parsed-string string backslash-index)
-                                 backslash-bitmap (unset-rightmost-bit backslash-bitmap)
+                                 ;; if we just unescaped a backslash then skip a backslash
+                                 backslash-bitmap (if (eql #\\ (char string current-index))
+                                                      (unset-rightmost-bit (unset-rightmost-bit backslash-bitmap))
+                                                      (unset-rightmost-bit backslash-bitmap))
                                  next-backslash   (unless (zerop backslash-bitmap)
                                                     (rightmost-bit-index backslash-bitmap)))
                         finally (let ((end-of-string (+ frozen-index boundary)))
@@ -181,8 +194,7 @@ first character after the escaped sequence."
                                                 parsed-string
                                                 :start current-index
                                                 :end end-of-string)
-                                  (setf current-index (1+ end-of-string))))
-                  (return)))))))
+                                  (setf current-index end-of-string)))))))))
 
 (defun %parse-object (string index)
   (declare (type simple-string string)
@@ -239,3 +251,10 @@ first character after the escaped sequence."
   (5am:is (equal '(2 #b100)
                  (multiple-value-list (skip-whitespace "  a   " 0)))
           "Bitmask is reversed & leading zeroes are ommitted."))
+
+(5am:test :test-%parse-string
+  (5am:is
+   (let ((long-string "this is a very very very very large test"))
+     (string= (format nil "~a~%" long-string)
+              (%parse-string (format nil "\"~a\\n\"" long-string) 0)))
+   "Test strings larger than chunk size with escape sequence"))
