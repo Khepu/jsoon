@@ -273,4 +273,13 @@ first character after the escaped sequence."
    (let ((long-string "this is a very very very very large test"))
      (string= (format nil "~a~%" long-string)
               (%parse-string (format nil "\"~a\\n\"" long-string) 0)))
-   "Test strings larger than chunk size with escape sequence"))
+   "Test strings larger than chunk size with escape sequence")
+  (5am:is
+   (let ((str (coerce #(#\" #\\ #\\ #\\ #\" #\") 'string)))
+     (string= "\\\""
+              (%parse-string str 0)))
+   "Unescape backslash and then double-quote")
+  (5am:signals
+      (let ((str (coerce #(#\" #\\ #\\ #\\ #\") 'string)))
+        (%parse-string str 0))
+    "No closing double-quote"))
