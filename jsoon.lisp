@@ -49,18 +49,16 @@
            (type fixnum index)
            (type character pad-character)
            (optimize (speed 3) (safety 1)))
-  (let ((chunk (make-array (list +chunk-length+) :element-type '(signed-byte 8))))
+  (let ((chunk (make-array (list +chunk-length+)
+                           :element-type '(signed-byte 8)
+                           :initial-element (char-code pad-character))))
     (declare (type string-chunk chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
                                   (length string))
           for i from index below upper-limit
           for j from 0
           for character = (char-code (char string i))
-          do (setf (aref chunk j) character)
-          finally (unless (eql pad-character #\Nul)
-                    (loop with pad-value = (char-code pad-character)
-                          for pad from upper-limit below +chunk-length+
-                          do (setf (aref chunk pad) pad-value))))
+          do (setf (aref chunk j) character))
     chunk))
 
 (defun skip-whitespace (string index)
@@ -83,8 +81,7 @@
          (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
     (if (zerop whitespace-bitmap)
         (values nil 0)
-        (values (+ index
-                   (rightmost-bit-index whitespace-bitmap))
+        (values (+ index (rightmost-bit-index whitespace-bitmap))
                 whitespace-bitmap))))
 
 (defun skip-to-next-character (string index)
