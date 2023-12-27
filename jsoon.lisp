@@ -159,7 +159,16 @@ first character after the escaped sequence."
                                   parsed-string
                                   :start current-index
                                   :end end-of-string))
-                  (return (max end-of-string current-index)))))
+                  (return (values (max end-of-string current-index)
+                                  double-quote-bitmap
+                                  next-double-quote)))))
+
+(define-condition unmatched-string-delimiter (error)
+  ((starting-position :initarg :starting-position
+                      :accessor starting-position))
+  (:report (lambda (condition stream)
+             (format stream "Could not find end of string starting at ~a!"
+                     (starting-position condition)))))
 
 (defun %parse-string (string index)
   (declare (type simple-string string)
@@ -168,19 +177,23 @@ first character after the escaped sequence."
   (with-output-to-string (parsed-string)
     (loop with current-index = (incf index)
           with raw-string-length = (length string)
-          while (< current-index raw-string-length)
+          with next-double-quote = raw-string-length
+          when (or (null next-double-quote)
+                   (>= current-index raw-string-length))
+            do (error 'unmatched-string-delimiter :starting-position (1- index))
+          while (and next-double-quote (< current-index next-double-quote))
           ;; `next-' prefix essentially means offset from `current-index'
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
                     (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
-                    (next-double-quote (unless (zerop double-quote-bitmap)
-                                         (rightmost-bit-index double-quote-bitmap)))
 
                     (backslash-mask   (sb-simd-avx2:s8.32= chunk +backslash+))
                     (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                     (next-backslash (unless (zerop backslash-bitmap)
                                       (rightmost-bit-index backslash-bitmap))))
+               (unless (zerop double-quote-bitmap)
+                 (setf next-double-quote (rightmost-bit-index double-quote-bitmap)))
                (cond
                  ;; the end of the string is known and no escaping is needed
                  ((and next-double-quote
@@ -189,7 +202,7 @@ first character after the escaped sequence."
                   (write-string string
                                 parsed-string
                                 :start current-index
-                                :end (+ current-index next-double-quote))
+                                :end (+ current-index (1- next-double-quote)))
                   (return))
 
                  ;; no string delimiter found and nothing to unescape, move forward
@@ -197,20 +210,20 @@ first character after the escaped sequence."
                   (write-string string
                                 parsed-string
                                 :start current-index
-                                :end (+ current-index (min (- raw-string-length current-index)
-                                                           +chunk-length+))))
+                                :end (+ current-index
+                                        (min (- raw-string-length current-index) +chunk-length+))))
 
                  ((or (and (not next-double-quote) next-backslash)
                       (> next-double-quote next-backslash))
-                  (setf current-index
-                        (%unescape-string parsed-string
-                                          raw-string-length
-                                          string
-                                          current-index
-                                          double-quote-bitmap
-                                          next-double-quote
-                                          backslash-bitmap
-                                          next-backslash))))))))
+                  (multiple-value-setq (current-index double-quote-bitmap next-double-quote)
+                    (%unescape-string parsed-string
+                                      raw-string-length
+                                      string
+                                      current-index
+                                      double-quote-bitmap
+                                      next-double-quote
+                                      backslash-bitmap
+                                      next-backslash))))))))
 
 (defun %parse-object (string index)
   (declare (type simple-string string)
@@ -279,7 +292,6 @@ first character after the escaped sequence."
      (string= "\\\""
               (%parse-string str 0)))
    "Unescape backslash and then double-quote")
-  (5am:signals
-      (let ((str (coerce #(#\" #\\ #\\ #\\ #\") 'string)))
-        (%parse-string str 0))
-    "No closing double-quote"))
+  (5am:signals 'unmatched-string-delimiter
+    (let ((str (coerce #(#\" #\\ #\\ #\\ #\") 'string)))
+      (%parse-string str 0))))
