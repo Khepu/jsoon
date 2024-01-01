@@ -132,7 +132,6 @@ first character after the escaped sequence."
         with boundary = (min remaining-string (or next-double-quote +chunk-length+))
         while (and next-backslash (< next-backslash boundary))
         for backslash-index = (+ frozen-index next-backslash)
-        do (format t "current-index: ~a ~%" current-index)
         when (< current-index backslash-index)
           do (write-string string
                            parsed-string
@@ -177,23 +176,24 @@ first character after the escaped sequence."
   (with-output-to-string (parsed-string)
     (loop with current-index = (incf index)
           with raw-string-length = (length string)
-          with next-double-quote = raw-string-length
-          when (or (null next-double-quote)
-                   (>= current-index raw-string-length))
+          with next-double-quote = nil
+          when (>= current-index raw-string-length)
             do (error 'unmatched-string-delimiter :starting-position (1- index))
-          while (and next-double-quote (< current-index next-double-quote))
+          while (< current-index ; next-double-quote
+                   raw-string-length
+                   )
           ;; `next-' prefix essentially means offset from `current-index'
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
                     (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
+                    (next-double-quote (unless (zerop double-quote-bitmap)
+                                         (rightmost-bit-index double-quote-bitmap)))
 
                     (backslash-mask   (sb-simd-avx2:s8.32= chunk +backslash+))
                     (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                     (next-backslash (unless (zerop backslash-bitmap)
                                       (rightmost-bit-index backslash-bitmap))))
-               (unless (zerop double-quote-bitmap)
-                 (setf next-double-quote (rightmost-bit-index double-quote-bitmap)))
                (cond
                  ;; the end of the string is known and no escaping is needed
                  ((and next-double-quote
@@ -202,7 +202,7 @@ first character after the escaped sequence."
                   (write-string string
                                 parsed-string
                                 :start current-index
-                                :end (+ current-index (1- next-double-quote)))
+                                :end (+ current-index next-double-quote))
                   (return))
 
                  ;; no string delimiter found and nothing to unescape, move forward
@@ -210,8 +210,8 @@ first character after the escaped sequence."
                   (write-string string
                                 parsed-string
                                 :start current-index
-                                :end (+ current-index
-                                        (min (- raw-string-length current-index) +chunk-length+))))
+                                :end (setf current-index (min raw-string-length
+                                                              (+ current-index +chunk-length+)))))
 
                  ((or (and (not next-double-quote) next-backslash)
                       (> next-double-quote next-backslash))
@@ -282,16 +282,13 @@ first character after the escaped sequence."
           "Bitmask is reversed & leading zeroes are ommitted."))
 
 (5am:test :test-%parse-string
-  (5am:is
-   (let ((long-string "this is a very very very very large test"))
-     (string= (format nil "~a~%" long-string)
-              (%parse-string (format nil "\"~a\\n\"" long-string) 0)))
-   "Test strings larger than chunk size with escape sequence")
-  (5am:is
-   (let ((str (coerce #(#\" #\\ #\\ #\\ #\" #\") 'string)))
-     (string= "\\\""
-              (%parse-string str 0)))
-   "Unescape backslash and then double-quote")
-  (5am:signals 'unmatched-string-delimiter
-    (let ((str (coerce #(#\" #\\ #\\ #\\ #\") 'string)))
-      (%parse-string str 0))))
+  (let ((long-string "this is a very very very very large test"))
+    (5am:is (string= (format nil "~a~%" long-string)
+                     (%parse-string (format nil "\"~a\\n\"" long-string) 0))
+            "Test strings larger than chunk size with escape sequence"))
+  (let ((str (coerce #(#\" #\\ #\\ #\\ #\" #\") 'string)))
+    (5am:is (string= "\\\""
+                     (%parse-string str 0))
+            "Unescape backslash and then double-quote"))
+  (let ((str (coerce #(#\" #\\ #\\ #\\ #\") 'string)))
+    (5am:signals unmatched-string-delimiter (%parse-string str 0))))
