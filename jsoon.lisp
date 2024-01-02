@@ -326,6 +326,10 @@ first character after the escaped sequence."
     (5am:is (string= (format nil "~a~%" long-string)
                      (%parse-string (format nil "\"~a\\n\"" long-string) 0))
             "Test strings larger than chunk size with escape sequence"))
+  (let ((long-string "this is a very very very very large test"))
+    (5am:is (string= (format nil "~a~%123" long-string)
+                     (%parse-string (format nil "\"~a\\n123\"" long-string) 0))
+            "Test strings larger than chunk size with escape sequence followed by normal characters"))
   (let ((str (coerce #(#\" #\\ #\\ #\\ #\" #\") 'string)))
     (5am:is (string= "\\\""
                      (%parse-string str 0))
