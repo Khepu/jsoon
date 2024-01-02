@@ -150,6 +150,12 @@ first character after the escaped sequence."
                    (write-char escaped-character out))))
             skip-next-backslash-p)))
 
+(defun next-offset (bitmap)
+  (declare (type bitmap bitmap)
+           (optimize (speed 3) (safety 1)))
+  (unless (zerop bitmap)
+    (rightmost-bit-index bitmap)))
+
 (defun %unescape-string (parsed-string
                          raw-string-length
                          string
@@ -178,22 +184,14 @@ first character after the escaped sequence."
         do (multiple-value-bind (new-index skip-next-backslash-p)
                (%unescape-char parsed-string string backslash-index)
              (setf current-index new-index
-                   ;; if we just unescaped a backslash then skip a backslash
                    backslash-bitmap (if skip-next-backslash-p
                                         (unset-rightmost-bit (unset-rightmost-bit backslash-bitmap))
                                         (unset-rightmost-bit backslash-bitmap))
-                   next-backslash (unless (zerop backslash-bitmap)
-                                    (rightmost-bit-index backslash-bitmap))))
+                   next-backslash (next-offset backslash-bitmap)))
 
-        finally (let ((end-of-string (+ frozen-index boundary)))
-                  (when (> end-of-string current-index)
-                    (write-string string
-                                  parsed-string
-                                  :start current-index
-                                  :end end-of-string))
-                  (return (values (max end-of-string current-index)
-                                  double-quote-bitmap
-                                  next-double-quote)))))
+        finally (return (values current-index
+                                double-quote-bitmap
+                                next-double-quote))))
 
 (define-condition unmatched-string-delimiter (error)
   ((starting-position :initarg :starting-position
@@ -218,13 +216,11 @@ first character after the escaped sequence."
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
                     (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
                     (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
-                    (next-double-quote (unless (zerop double-quote-bitmap)
-                                         (rightmost-bit-index double-quote-bitmap)))
+                    (next-double-quote (next-offset double-quote-bitmap))
 
                     (backslash-mask   (sb-simd-avx2:s8.32= chunk +backslash+))
                     (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
-                    (next-backslash (unless (zerop backslash-bitmap)
-                                      (rightmost-bit-index backslash-bitmap))))
+                    (next-backslash (next-offset backslash-bitmap)))
                (cond
                  ;; the end of the string is known and no escaping is needed
                  ((and next-double-quote
