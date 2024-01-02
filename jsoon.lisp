@@ -200,6 +200,16 @@ first character after the escaped sequence."
              (format stream "Could not find end of string starting at ~a!"
                      (starting-position condition)))))
 
+(define-condition unexpected-character (error)
+  ((index :initarg :index
+          :accessor index)
+   (value :initarg :value
+          :accessor value))
+  (:report (lambda (condition stream)
+             (format stream "Unexpected character '~a' at position ~a!"
+                     (value condition)
+                     (index condition)))))
+
 (defun %parse-string (string index)
   (declare (type simple-string string)
            (type fixnum index)
@@ -283,9 +293,8 @@ first character after the escaped sequence."
       ((eql character #\")          (%parse-string string index))
       ((or (digit-char-p character)
            (eql character #\-))    (%parse-number string index))
-      (t (error "Failed to parse JSON at position '~a': Unexpected character '~a'"
-                index
-                character)))))
+      (t (error 'unexpected-character :index index
+                                      :value character )))))
 
 ;;
 ;; Tests
