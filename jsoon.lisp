@@ -97,27 +97,58 @@
         until new-index
         finally (return new-index)))
 
+(defun high-surrogate-p (code-value)
+  "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
+with the UTF-16 encoding form (as surrogate pairs) and do not directly represent
+characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader.lisp#L82C1-L87C55)"
+  (<= #xD800 code-value #xDFFF))
+
+(defun surrogate-char (high-surrogate low-surrogate)
+  (code-char (+ #x10000 (- low-surrogate #xDC00)
+                (* #x400 (- high-surrogate #xD800)))))
+
+(defun %parse-surrogate (string index)
+  (declare (type simple-string string)
+           (type fixnum index))
+  (parse-integer string
+                 :start index
+                 :end (+ index 4)
+                 :radix 16))
+
 (defun %unescape-char (out string index)
-  "Write the unescaped character to `out' and return an index pointing at the
+  "Write the unescaped character to `out' and return an `index' pointing at the
 first character after the escaped sequence."
   (declare (type simple-string string)
            (type fixnum index)
            (optimize (speed 3) (safety 1)))
-  (let ((escaped-character (char string (1+ index))))
-    (case escaped-character
-      (#\n (prog1 (incf index 2)
-             (write-char #\linefeed out)))
-      (#\f (prog1 (incf index 2)
-             (write-char #\linefeed out)))
-      (#\b (prog1 (incf index 2)
-             (write-char #\backspace out)))
-      (#\r (prog1 (incf index 2)
-             (write-char #\return out)))
-      (#\t (prog1 (incf index 2)
-             (write-char #\tab out)))
-      (#\u (error "Not supported"))
-      (t (prog1 (incf index 2)
-           (write-char escaped-character out))))))
+  (incf index)
+  (let ((escaped-character (char string index))
+        (skip-next-backslash-p nil))
+    (values (case escaped-character
+              (#\n (prog1 (incf index)
+                     (write-char #\linefeed out)))
+              (#\f (prog1 (incf index)
+                     (write-char #\linefeed out)))
+              (#\b (prog1 (incf index)
+                     (write-char #\backspace out)))
+              (#\r (prog1 (incf index)
+                     (write-char #\return out)))
+              (#\t (prog1 (incf index)
+                     (write-char #\tab out)))
+              (#\u (let ((surrogate (%parse-surrogate string (1+ index)))) ;; skip 'u'
+                     (if (high-surrogate-p surrogate)
+                         (let ((low-surrogate (%parse-surrogate string (+ index 7)))) ;; 4 digits + backslash + 'u' + 1 to skip 'u'
+                           (write-char (surrogate-char surrogate low-surrogate) out)
+                           (setf skip-next-backslash-p t)
+                           (incf index 11))
+                         (prog1 (incf index 5)
+                           (write-char (code-char surrogate) out)))))
+              (#\\ (prog1 (incf index)
+                     (setf skip-next-backslash-p t)
+                     (write-char escaped-character out)))
+              (t (prog1 (incf index)
+                   (write-char escaped-character out))))
+            skip-next-backslash-p)))
 
 (defun %unescape-string (parsed-string
                          raw-string-length
@@ -144,13 +175,15 @@ first character after the escaped sequence."
                                        (rightmost-bit-index backslash-bitmap))
                    boundary (min (or next-double-quote +chunk-length+)
                                  remaining-string))
-        do (setf current-index (%unescape-char parsed-string string backslash-index)
-                 ;; if we just unescaped a backslash then skip a backslash
-                 backslash-bitmap (if (eql #\\ (char string (1- current-index)))
-                                      (unset-rightmost-bit (unset-rightmost-bit backslash-bitmap))
-                                      (unset-rightmost-bit backslash-bitmap))
-                 next-backslash (unless (zerop backslash-bitmap)
-                                  (rightmost-bit-index backslash-bitmap)))
+        do (multiple-value-bind (new-index skip-next-backslash-p)
+               (%unescape-char parsed-string string backslash-index)
+             (setf current-index new-index
+                   ;; if we just unescaped a backslash then skip a backslash
+                   backslash-bitmap (if skip-next-backslash-p
+                                        (unset-rightmost-bit (unset-rightmost-bit backslash-bitmap))
+                                        (unset-rightmost-bit backslash-bitmap))
+                   next-backslash (unless (zerop backslash-bitmap)
+                                    (rightmost-bit-index backslash-bitmap))))
 
         finally (let ((end-of-string (+ frozen-index boundary)))
                   (when (> end-of-string current-index)
@@ -179,9 +212,7 @@ first character after the escaped sequence."
           with next-double-quote = nil
           when (>= current-index raw-string-length)
             do (error 'unmatched-string-delimiter :starting-position (1- index))
-          while (< current-index ; next-double-quote
-                   raw-string-length
-                   )
+          while (< current-index raw-string-length)
           ;; `next-' prefix essentially means offset from `current-index'
           do (let* ((chunk (chunk string current-index))
                     (chunk (sb-simd-avx2:s8.32-aref chunk 0))
@@ -282,6 +313,10 @@ first character after the escaped sequence."
           "Bitmask is reversed & leading zeroes are ommitted."))
 
 (5am:test :test-%parse-string
+  (let ((empty-string (coerce #(#\" #\") 'string)))
+    (5am:is (string= ""
+                     (%parse-string empty-string 0))
+            "Parse empty string"))
   (let ((long-string "this is a very very very very large test"))
     (5am:is (string= (format nil "~a~%" long-string)
                      (%parse-string (format nil "\"~a\\n\"" long-string) 0))
@@ -291,4 +326,10 @@ first character after the escaped sequence."
                      (%parse-string str 0))
             "Unescape backslash and then double-quote"))
   (let ((str (coerce #(#\" #\\ #\\ #\\ #\") 'string)))
-    (5am:signals unmatched-string-delimiter (%parse-string str 0))))
+    (5am:signals unmatched-string-delimiter (%parse-string str 0)))
+  (5am:is (string= (coerce #(#\SYMBOL_FOR_START_OF_HEADING) 'string)
+                   (%parse-string "\"\\uD800\\u0001\"" 0))
+          "UTF-16 character 2-bytes")
+  (5am:is (string= (coerce #(#\HANGUL_SYLLABLE_HIB) 'string)
+                   (%parse-string "\"\\uD799\"" 0))
+          "UTF-16 character 1-byte"))
