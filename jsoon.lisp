@@ -24,10 +24,35 @@
 (deftype string-chunk ()
   `(array (signed-byte 8) (,+chunk-length+)))
 
-(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char))
+(deftype bitmap ()
+  `(unsigned-byte ,+chunk-length+))
+
+(deftype bitmap-index ()
+  `(or nil
+       (unsigned-byte ,(truncate (log +chunk-length+ 2)))))
+
+(define-condition unmatched-string-delimiter (error)
+  ((starting-position :initarg :starting-position
+                      :accessor starting-position))
+  (:report (lambda (condition stream)
+             (format stream "Could not find end of string starting at ~a!"
+                     (starting-position condition)))))
+
+(define-condition unexpected-character (error)
+  ((index :initarg :index
+          :accessor index)
+   (value :initarg :value
+          :accessor value))
+  (:report (lambda (condition stream)
+             (format stream "Unexpected character '~a' at position ~a!"
+                     (value condition)
+                     (index condition)))))
+
+(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char))
 
 (defun rightmost-bit (n)
-  (declare (type fixnum n)
+  (declare (type bitmap n)
+           (dynamic-extent n)
            (optimize (speed 3) (safety 1)))
   (logand (1+ (lognot n))
           n))
@@ -35,14 +60,15 @@
 (defun rightmost-bit-index (n)
   "Returns a 0-based index of the location of the rightmost set bit of `n'."
   (declare (type fixnum n)
-           (optimize (speed 3) (safety 1)))
-  (truncate (coerce (log (rightmost-bit n) 2)
-                    'single-float)))
+           (optimize (speed 3) (safety 1))
+           (dynamic-extent n))
+  (truncate (the single-float (log (rightmost-bit n) 2))))
 
 (defun unset-rightmost-bit (n)
-  (declare (type fixnum n)
-           (optimize (speed 3) (safety 1)))
-  (the fixnum (logxor n (rightmost-bit n))))
+  (declare (type bitmap n)
+           (optimize (speed 3) (safety 1))
+           (dynamic-extent n))
+  (logxor n (rightmost-bit n)))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
@@ -101,15 +127,20 @@
   "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
 with the UTF-16 encoding form (as surrogate pairs) and do not directly represent
 characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader.lisp#L82C1-L87C55)"
+  (declare (optimize (speed 3) (safety 1)))
   (<= #xD800 code-value #xDFFF))
 
 (defun surrogate-char (high-surrogate low-surrogate)
-  (code-char (+ #x10000 (- low-surrogate #xDC00)
-                (* #x400 (- high-surrogate #xD800)))))
+  (declare (type fixnum high-surrogate low-surrogate)
+           (optimize (speed 3) (safety 1)))
+  (code-char (+ #x10000
+                (- low-surrogate #xDC00)
+                (ash (- high-surrogate #xD800) 10))))
 
 (defun %parse-surrogate (string index)
   (declare (type simple-string string)
-           (type fixnum index))
+           (type fixnum index)
+           (dynamic-extent string index))
   (parse-integer string
                  :start index
                  :end (+ index 4)
@@ -119,6 +150,7 @@ characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader
   "Write the unescaped character to `out' and return an `index' pointing at the
 first character after the escaped sequence."
   (declare (type simple-string string)
+           (type string-stream out)
            (type fixnum index)
            (optimize (speed 3) (safety 1)))
   (incf index)
@@ -151,8 +183,10 @@ first character after the escaped sequence."
             skip-next-backslash-p)))
 
 (defun next-offset (bitmap)
+  "Returns the rightmost bit index (0-based) if `bitmap' > 0, otherwise NIL"
   (declare (type bitmap bitmap)
-           (optimize (speed 3) (safety 1)))
+           (optimize (speed 3) (safety 1))
+           (dynamic-extent bitmap))
   (unless (zerop bitmap)
     (rightmost-bit-index bitmap)))
 
@@ -164,6 +198,12 @@ first character after the escaped sequence."
                          next-double-quote
                          backslash-bitmap
                          next-backslash)
+  (declare (type simple-string string)
+           (type string-stream parsed-string)
+           (type fixnum raw-string-length current-index)
+           (dynamic-extent string parsed-string
+                           backslash-bitmap next-backslash)
+           (optimize (speed 3) (safety 1)))
   (loop with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
         with remaining-string = (- raw-string-length frozen-index)
         with boundary = (min remaining-string (or next-double-quote +chunk-length+))
@@ -175,10 +215,10 @@ first character after the escaped sequence."
                            :start current-index
                            :end backslash-index)
              ;; move to the next double-quote if we just escaped one
-        when (eql 1 (- next-double-quote next-backslash))
+        when (and next-double-quote
+                  (eql 1 (- next-double-quote next-backslash)))
           do (setf double-quote-bitmap (unset-rightmost-bit double-quote-bitmap)
-                   next-double-quote (unless (zerop double-quote-bitmap)
-                                       (rightmost-bit-index backslash-bitmap))
+                   next-double-quote (next-offset double-quote-bitmap)
                    boundary (min (or next-double-quote +chunk-length+)
                                  remaining-string))
         do (multiple-value-bind (new-index skip-next-backslash-p)
@@ -193,31 +233,14 @@ first character after the escaped sequence."
                                 double-quote-bitmap
                                 next-double-quote))))
 
-(define-condition unmatched-string-delimiter (error)
-  ((starting-position :initarg :starting-position
-                      :accessor starting-position))
-  (:report (lambda (condition stream)
-             (format stream "Could not find end of string starting at ~a!"
-                     (starting-position condition)))))
-
-(define-condition unexpected-character (error)
-  ((index :initarg :index
-          :accessor index)
-   (value :initarg :value
-          :accessor value))
-  (:report (lambda (condition stream)
-             (format stream "Unexpected character '~a' at position ~a!"
-                     (value condition)
-                     (index condition)))))
-
 (defun %parse-string (string index)
   (declare (type simple-string string)
            (type fixnum index)
-           (optimize (speed 3) (safety 1)))
+           (optimize (speed 3) (safety 1))
+           (dynamic-extent string))
   (with-output-to-string (parsed-string)
     (loop with current-index = (incf index)
           with raw-string-length = (length string)
-          with next-double-quote = nil
           when (>= current-index raw-string-length)
             do (error 'unmatched-string-delimiter :starting-position (1- index))
           while (< current-index raw-string-length)
@@ -231,6 +254,9 @@ first character after the escaped sequence."
                     (backslash-mask   (sb-simd-avx2:s8.32= chunk +backslash+))
                     (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                     (next-backslash (next-offset backslash-bitmap)))
+               (declare (type bitmap double-quote-bitmap backslash-bitmap)
+                        (dynamic-extent double-quote-bitmap next-double-quote
+                                        backslash-bitmap next-backslash))
                (cond
                  ;; the end of the string is known and no escaping is needed
                  ((and next-double-quote
