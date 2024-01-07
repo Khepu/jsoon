@@ -288,6 +288,39 @@ first character after the escaped sequence."
                                       backslash-bitmap
                                       next-backslash))))))))
 
+(defun next-whitespace (string index)
+  (declare (type simple-string string)
+           (type fixnum index)
+           (optimize (speed 3) (safety 1)))
+  (loop with string-length = (length string)
+        for current-index from index by +chunk-length+
+        while (< current-index string-length)
+        do (let* ((chunk (chunk string index))
+                  (chunk (sb-simd-avx2:s8.32-aref chunk 0))
+                  (space-mask   (sb-simd-avx2:s8.32= chunk +space+))
+                  (tab-mask     (sb-simd-avx2:s8.32= chunk +tab+))
+                  (newline-mask (sb-simd-avx2:s8.32= chunk +newline+))
+                  (whitespace-pack (sb-simd-avx2:u8.32-or space-mask
+                                                          tab-mask
+                                                          newline-mask))
+                  (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
+             (unless (zerop whitespace-bitmap)
+               (return (+ current-index (rightmost-bit-index whitespace-bitmap)))))
+        finally (when (>= current-index string-length)
+                  string-length)))
+
+(defun %parse-number (string index)
+  (declare (type simple-string string)
+           (type fixnum index))
+  (let ((end-of-number (next-whitespace string index))
+        (*read-eval* nil))
+    ;; HACK: A bit cheesy but it will do for now
+    (read-from-string string
+                      t
+                      nil
+                      :start index
+                      :end end-of-number)))
+
 (defun %parse-object (string index)
   (declare (type simple-string string)
            (type fixnum index))
@@ -302,11 +335,6 @@ first character after the escaped sequence."
   ;; recursively parse
   ;; if a ',' follows then repeat
   ;; if a ']' follows then stop
-  )
-
-(defun %parse-number (string index)
-  ;; parse until the next space
-  ;; if a '.' is included then it's a real, otherwise integer
   )
 
 (defun parse (string &optional (index 0))
