@@ -454,6 +454,6 @@ first character after the escaped sequence."
   (5am:is (equal '( 1 2 (3 "a") 5)
                  (%parse-array "[1,2,[3, \"a\"],5]" 0))
           "Nesting 1")
-  (5am:is (equal '( 1 2 (3 ("a")) 5)
-                 (%parse-array "[1,2,[3, [\"a\"]],5]" 0))
+  (5am:is (equal `( 1 2 (3 (,(format nil "~%"))) 5)
+                 (%parse-array "[1,2,[3, [\"\\n\"]],5]" 0))
           "Nesting 2"))
