@@ -376,7 +376,7 @@ first character after the escaped sequence."
 
                   (t
                    (error (format nil "Missing array delimiter at position ~a!" current-index))))))
-     current-index)))
+     (incf current-index))))
 
 (defun parse (string &optional (index 0))
   (declare (type simple-string string))
@@ -437,3 +437,23 @@ first character after the escaped sequence."
   (5am:is (string= (coerce #(#\HANGUL_SYLLABLE_HIB) 'string)
                    (%parse-string "\"\\uD799\"" 0))
           "UTF-16 character 1-byte"))
+
+(5am:test :test-%parse-array
+  (5am:is (equal nil
+                 (%parse-array "[   ]" 0))
+          "Empty array")
+  (5am:is (equal '(1 2 3)
+                 (%parse-array "[ 1   , 2,3]" 0))
+          "Spacing between numbers")
+  (5am:is (equal '("a" "b" "c")
+                 (%parse-array "[ \"a\",\"b\"  ,  \"c\"]" 0))
+          "Spacing between string")
+  (5am:is (equal '("a" 2 3 "c")
+                 (%parse-array "[ \"a\", 2, 3  ,  \"c\"]" 0))
+          "Mixed types")
+  (5am:is (equal '( 1 2 (3 "a") 5)
+                 (%parse-array "[1,2,[3, \"a\"],5]" 0))
+          "Nesting 1")
+  (5am:is (equal '( 1 2 (3 ("a")) 5)
+                 (%parse-array "[1,2,[3, [\"a\"]],5]" 0))
+          "Nesting 2"))
