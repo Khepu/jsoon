@@ -90,10 +90,19 @@
           do (setf (aref chunk j) character))
     chunk))
 
+(defun next-offset (bitmap)
+  "Returns the rightmost bit index (0-based) if `bitmap' > 0, otherwise NIL"
+  (declare (type bitmap bitmap)
+           (optimize (speed 3) (safety 1))
+           (dynamic-extent bitmap))
+  (unless (zerop bitmap)
+    (rightmost-bit-index bitmap)))
+
 (defun skip-whitespace (string index)
   "Skips to the first non-whitespace character."
   (declare (type simple-string string)
-           (type fixnum index))
+           (type fixnum index)
+           (optimize (speed 3) (safety 1)))
   ;; Padding with a spaces to make detection of chunks with just whitespace
   ;; easier when they are less than `+chunk-length+'.
   (let* ((chunk (chunk string index #\space))
@@ -108,23 +117,30 @@
                                                   newline-mask))
          ;; The produced mask is backwards
          (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-    (if (zerop whitespace-bitmap)
-        (values nil 0)
-        (values (+ index (rightmost-bit-index whitespace-bitmap))
-                whitespace-bitmap))))
+    (unless (zerop whitespace-bitmap)
+        (+ index (rightmost-bit-index whitespace-bitmap)))))
+
+(defun not-whitespace-p (character)
+  (and (char/= character #\space)
+       (char/= character #\tab)
+       (char/= character #\newline)))
 
 (defun skip-to-next-character (string index)
   (declare (type simple-string string)
-           (type fixnum index))
-  (loop with current-index = index
-        with new-index
-        with whitespace-bitmap
-        do (multiple-value-setq (new-index whitespace-bitmap)
-             (skip-whitespace string current-index))
-        unless new-index
-          do (incf current-index +chunk-length+)
-        until new-index
-        finally (return new-index)))
+           (type fixnum index)
+           (dynamic-extent string)
+           (optimize (speed 3) (safety 1)))
+  (cond
+    ((not-whitespace-p (char string index))      index)
+    ((not-whitespace-p (char string (1+ index))) (incf index))
+    (t
+     (loop with whitespace-bitmap
+           with current-index = (incf index 2)
+           for new-index = (skip-whitespace string current-index)
+           unless new-index
+             do (incf current-index +chunk-length+)
+           until new-index
+           finally (return new-index)))))
 
 (defun high-surrogate-p (code-value)
   "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
@@ -185,14 +201,6 @@ first character after the escaped sequence."
                    (write-char escaped-character out))))
             skip-next-backslash-p)))
 
-(defun next-offset (bitmap)
-  "Returns the rightmost bit index (0-based) if `bitmap' > 0, otherwise NIL"
-  (declare (type bitmap bitmap)
-           (optimize (speed 3) (safety 1))
-           (dynamic-extent bitmap))
-  (unless (zerop bitmap)
-    (rightmost-bit-index bitmap)))
-
 (defun %unescape-string (parsed-string
                          string
                          current-index
@@ -243,6 +251,7 @@ first character after the escaped sequence."
            (optimize (speed 3) (safety 1))
            (dynamic-extent string))
   (let ((current-index (incf index)))
+    (declare (type fixnum current-index))
     (values
      (with-output-to-string (parsed-string)
        (loop with raw-string-length = (length string)
@@ -340,13 +349,42 @@ first character after the escaped sequence."
 
 (defun %parse-object (string index)
   (declare (type simple-string string)
-           (type fixnum index))
-  ;; parse a string
-  ;; next char should be ':'
-  ;; parse recursively
-  ;; do for all attributes
-  ;; find matching }
-  )
+           (type fixnum index)
+           (dynamic-extent string)
+           (optimize (speed 3) (safety 1)))
+  (let ((current-index (skip-to-next-character string (1+ index)))
+        (parsed-object (make-hash-table :test 'equal)))
+    (declare (type fixnum current-index))
+    ;; empty object check
+    (when (char= (char string current-index) #\})
+      (return-from %parse-object (values parsed-object current-index)))
+    (values
+     (loop with new-index
+           with parsed-key and parsed-value
+           with raw-string-length = (length string)
+           while (< current-index raw-string-length)
+           do (progn
+                (when (char/= #\" (char string current-index))
+                  (error (format nil "Key not of type string at  posisiotn ~a!"
+                                 current-index)))
+                (multiple-value-setq (parsed-key new-index)
+                  (%parse-string string (incf current-index)))
+                (setf current-index (skip-to-next-character string new-index))
+                (if (char= #\: (char string current-index))
+                    (incf current-index)
+                    (error (format nil "Missing ':' after key '~a' at position ~a!"
+                                   parsed-key current-index)))
+                (multiple-value-setq (parsed-value new-index)
+                  (parse string current-index))
+                (setf current-index (skip-to-next-character string new-index)
+                      (gethash parsed-key parsed-object) parsed-value)
+                (let ((character (char string current-index)))
+                  (cond
+                    ((char= #\} character) (return parsed-object))
+                    ((char/= #\, character) (error (format nil "Expected ',' after object value. Instead found ~a at position ~a!"
+                                                           character current-index)))
+                    (t (setf current-index (skip-to-next-character string (incf current-index))))))))
+     (incf current-index))))
 
 (defun %parse-array (string index)
   (declare (type simple-string string)
@@ -368,26 +406,36 @@ first character after the escaped sequence."
 
            do (let ((character (char string current-index)))
                 (cond
-                  ((char= character #\])
-                   (loop-finish))
-
-                  ((char= character #\,)
-                   (incf current-index))
-
-                  (t
-                   (error (format nil "Missing array delimiter at position ~a!" current-index))))))
+                  ((char= character #\]) (loop-finish))
+                  ((char= character #\,) (incf current-index))
+                  (t (error (format nil "Missing array delimiter at position ~a!" current-index))))))
      (incf current-index))))
 
+(defun %parse-null (string index)
+  (declare (type simple-string string)
+           (type fixnum index)
+           (dynamic-extent string)
+           (optimize (speed 3) (safety 1)))
+  (if (and (char= #\u (char string (1+ index)))
+           (char= #\l (char string (+ index 2)))
+           (char= #\l (char string (+ index 3))))
+      (values nil (+ index 4))
+      (error (format nil "Expected 'null' at position ~a!" index))))
+
 (defun parse (string &optional (index 0))
-  (declare (type simple-string string))
+  (declare (type simple-string string)
+           (type fixnum index)
+           (dynamic-extent string)
+           (optimize (speed 3) (safety 1)))
   (let* ((index (skip-to-next-character string index))
          (character (char string index)))
     (cond
-      ((eql character #\{)          (%parse-object string index))
-      ((eql character #\[)          (%parse-array string index))
-      ((eql character #\")          (%parse-string string index))
+      ((char= character #\{)          (%parse-object string index))
+      ((char= character #\[)          (%parse-array string index))
+      ((char= character #\")          (%parse-string string index))
+      ((char= character #\n)          (%parse-null string index))
       ((or (digit-char-p character)
-           (eql character #\-))     (%parse-number string index))
+           (char= character #\-))     (%parse-number string index))
       (t (error 'unexpected-character :index index
                                       :value character)))))
 
@@ -451,9 +499,12 @@ first character after the escaped sequence."
   (5am:is (equal '("a" 2 3 "c")
                  (%parse-array "[ \"a\", 2, 3  ,  \"c\"]" 0))
           "Mixed types")
-  (5am:is (equal '( 1 2 (3 "a") 5)
+  (5am:is (equal '(1 2 (3 "a") 5)
                  (%parse-array "[1,2,[3, \"a\"],5]" 0))
           "Nesting 1")
-  (5am:is (equal `( 1 2 (3 (,(format nil "~%"))) 5)
+  (5am:is (equal `(1 2 (3 (,(format nil "~%"))) 5)
                  (%parse-array "[1,2,[3, [\"\\n\"]],5]" 0))
-          "Nesting 2"))
+          "Nesting 2")
+  (5am:is (equal `(1 nil (3 (,(format nil "~%"))) 5 nil)
+                 (%parse-array "[1,null,[3, [\"\\n\"]],5, null]" 0))
+          "Nulls"))
