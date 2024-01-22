@@ -10,7 +10,7 @@
 (require :sb-simd)
 
 (setq sb-ext:*block-compile-default* t)
-(declaim (optimize (speed 3) (safety 1) (compilation-speed 0)))
+(declaim (optimize (speed 3) (debug 0) (safety 1) (compilation-speed 0)))
 
 (defparameter *data* (uiop:read-file-string "./10mb.json"))
 
@@ -84,14 +84,14 @@
   (the fixnum (truncate (the single-float (log (rightmost-bit n) 2)))))
 
 (defun unset-rightmost-bit (n)
-  (declare (type bitmap n)
-           (optimize (speed 3) (safety 1)))
+  (declare (type bitmap n))
   (logxor n (rightmost-bit n)))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
            (type fixnum index)
-           (type character pad-character))
+           (type character pad-character)
+           (optimize (speed 3) (safety 0)))
   (let ((chunk (make-array (list +chunk-length+)
                            :element-type '(signed-byte 8)
                            :initial-element (char-code pad-character))))
@@ -158,7 +158,6 @@
   "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
 with the UTF-16 encoding form (as surrogate pairs) and do not directly represent
 characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader.lisp#L82C1-L87C55)"
-  (declare (optimize (speed 3) (safety 1)))
   (<= #xD800 code-value #xDFFF))
 
 (defun surrogate-char (high-surrogate low-surrogate)
@@ -272,8 +271,6 @@ first character after the escaped sequence."
                        (backslash-mask   (chunk= chunk +backslash+))
                        (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                        (next-backslash (next-offset backslash-bitmap)))
-                  (declare (type bitmap double-quote-bitmap backslash-bitmap)
-                           (type bitmap-index next-double-quote next-backslash))
                   (cond
                     ;; the end of the string is known and no escaping is needed
                     ((and next-double-quote
@@ -284,7 +281,7 @@ first character after the escaped sequence."
                                    :start current-index
                                    :end (incf current-index next-double-quote))
                      (incf current-index)
-                     (return))
+                     (loop-finish))
 
                     ;; no string delimiter found and nothing to unescape, move forward
                     ((and (not next-double-quote) (not next-backslash))
