@@ -9,20 +9,23 @@
 
 (require :sb-simd)
 
+(setq sb-ext:*block-compile-default* t)
+(declaim (optimize (speed 3) (safety 1) (compilation-speed 0)))
+
 (defparameter *data* (uiop:read-file-string "./10mb.json"))
 
 (defparameter *mock* "   {  \"my-data\":  123}")
 
-(defconstant +chunk-length+ 32)
+(defconstant +chunk-length+ (the fixnum 32))
 
-(defconstant +space+        (sb-simd-avx2:s8.32 (char-code #\space)))
-(defconstant +tab+          (sb-simd-avx2:s8.32 (char-code #\tab)))
-(defconstant +newline+      (sb-simd-avx2:s8.32 (char-code #\newline)))
-(defconstant +double-quote+ (sb-simd-avx2:s8.32 (char-code #\")))
-(defconstant +backslash+    (sb-simd-avx2:s8.32 (char-code #\\)))
-(defconstant +comma+        (sb-simd-avx2:s8.32 (char-code #\,)))
-(defconstant +closing-bracket+ (sb-simd-avx2:s8.32 (char-code #\])))
-(defconstant +closing-brace+   (sb-simd-avx2:s8.32 (char-code #\})))
+(defparameter +space+        (sb-simd-avx2:s8.32 (char-code #\space)))
+(defparameter +tab+          (sb-simd-avx2:s8.32 (char-code #\tab)))
+(defparameter +newline+      (sb-simd-avx2:s8.32 (char-code #\newline)))
+(defparameter +double-quote+ (sb-simd-avx2:s8.32 (char-code #\")))
+(defparameter +backslash+    (sb-simd-avx2:s8.32 (char-code #\\)))
+(defparameter +comma+        (sb-simd-avx2:s8.32 (char-code #\,)))
+(defparameter +closing-bracket+ (sb-simd-avx2:s8.32 (char-code #\])))
+(defparameter +closing-brace+   (sb-simd-avx2:s8.32 (char-code #\})))
 
 (deftype string-chunk ()
   `(array (signed-byte 8) (,+chunk-length+)))
@@ -51,33 +54,44 @@
                      (value condition)
                      (index condition)))))
 
-(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char))
+(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char skip-to-next-character))
+
+
+(defmacro chunk= (chunk value)
+  `(let ((value-mask (sb-simd-avx2:s8.32= (the (sb-ext:simd-pack-256 (signed-byte 8)) ,chunk)
+                                          (the (sb-ext:simd-pack-256 (signed-byte 8)) ,value))))
+     (declare (type (sb-ext:simd-pack-256 (unsigned-byte 8)) value-mask))
+     value-mask))
+
+(defmacro chunk/= (chunk value)
+  `(let ((value-mask (sb-simd-avx2:s8.32/= (the (sb-ext:simd-pack-256 (signed-byte 8)) ,chunk)
+                                           (the (sb-ext:simd-pack-256 (signed-byte 8)) ,value))))
+     (declare (type (sb-ext:simd-pack-256 (unsigned-byte 8)) value-mask))
+     value-mask))
+
+(defmacro pack (chunk)
+  `(the (sb-ext:simd-pack-256 (signed-byte 8))
+        (sb-simd-avx2:s8.32-aref ,chunk 0)))
 
 (defun rightmost-bit (n)
-  (declare (type bitmap n)
-           (dynamic-extent n)
-           (optimize (speed 3) (safety 1)))
+  (declare (type bitmap n))
   (logand (1+ (lognot n))
           n))
 
 (defun rightmost-bit-index (n)
   "Returns a 0-based index of the location of the rightmost set bit of `n'."
-  (declare (type fixnum n)
-           (optimize (speed 3) (safety 1))
-           (dynamic-extent n))
-  (truncate (the single-float (log (rightmost-bit n) 2))))
+  (declare (type fixnum n))
+  (the fixnum (truncate (the single-float (log (rightmost-bit n) 2)))))
 
 (defun unset-rightmost-bit (n)
   (declare (type bitmap n)
-           (optimize (speed 3) (safety 1))
-           (dynamic-extent n))
+           (optimize (speed 3) (safety 1)))
   (logxor n (rightmost-bit n)))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
            (type fixnum index)
-           (type character pad-character)
-           (optimize (speed 3) (safety 1)))
+           (type character pad-character))
   (let ((chunk (make-array (list +chunk-length+)
                            :element-type '(signed-byte 8)
                            :initial-element (char-code pad-character))))
@@ -92,25 +106,22 @@
 
 (defun next-offset (bitmap)
   "Returns the rightmost bit index (0-based) if `bitmap' > 0, otherwise NIL"
-  (declare (type bitmap bitmap)
-           (optimize (speed 3) (safety 1))
-           (dynamic-extent bitmap))
+  (declare (type bitmap bitmap))
   (unless (zerop bitmap)
     (rightmost-bit-index bitmap)))
 
 (defun skip-whitespace (string index)
   "Skips to the first non-whitespace character."
   (declare (type simple-string string)
-           (type fixnum index)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   ;; Padding with a spaces to make detection of chunks with just whitespace
   ;; easier when they are less than `+chunk-length+'.
   (let* ((chunk (chunk string index #\space))
          ;; Packing here instead of inside `chunk' to avoid pointer coercion
-         (chunk (sb-simd-avx2:s8.32-aref chunk 0))
-         (space-mask   (sb-simd-avx2:s8.32/= chunk +space+))
-         (tab-mask     (sb-simd-avx2:s8.32/= chunk +tab+))
-         (newline-mask (sb-simd-avx2:s8.32/= chunk +newline+))
+         (chunk (pack chunk))
+         (space-mask   (chunk/= chunk +space+))
+         (tab-mask     (chunk/= chunk +tab+))
+         (newline-mask (chunk/= chunk +newline+))
          ;; Equality checks with simd will produce unsigned results of the same length
          (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
                                                   tab-mask
@@ -118,27 +129,28 @@
          ;; The produced mask is backwards
          (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
     (unless (zerop whitespace-bitmap)
-        (+ index (rightmost-bit-index whitespace-bitmap)))))
+      (incf index (rightmost-bit-index whitespace-bitmap)))))
 
 (defun not-whitespace-p (character)
-  (and (char/= character #\space)
-       (char/= character #\tab)
-       (char/= character #\newline)))
+  (declare (type character character)
+           (optimize (speed 3) (safety 0)))
+  (let ((character (char-code character)))
+    (not (or (eql character #.(char-code #\space))
+             (eql character #.(char-code #\tab))
+             (eql character #.(char-code #\newline))))))
 
 (defun skip-to-next-character (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   (cond
-    ((not-whitespace-p (char string index))      index)
-    ((not-whitespace-p (char string (1+ index))) (incf index))
+    ((not-whitespace-p (char string index))        index)
+    ((not-whitespace-p (char string (incf index))) index)
     (t
+     (incf index)
      (loop with whitespace-bitmap
-           with current-index = (incf index 2)
-           for new-index = (skip-whitespace string current-index)
+           for new-index = (skip-whitespace string index)
            unless new-index
-             do (incf current-index +chunk-length+)
+             do (incf index +chunk-length+)
            until new-index
            finally (return new-index)))))
 
@@ -150,16 +162,14 @@ characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader
   (<= #xD800 code-value #xDFFF))
 
 (defun surrogate-char (high-surrogate low-surrogate)
-  (declare (type fixnum high-surrogate low-surrogate)
-           (optimize (speed 3) (safety 1)))
+  (declare (type fixnum high-surrogate low-surrogate))
   (code-char (+ #x10000
                 (- low-surrogate #xDC00)
                 (ash (- high-surrogate #xD800) 10))))
 
 (defun %parse-surrogate (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string index))
+           (type fixnum index))
   (parse-integer string
                  :start index
                  :end (+ index 4)
@@ -170,8 +180,7 @@ characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader
 first character after the escaped sequence."
   (declare (type simple-string string)
            (type string-stream out)
-           (type fixnum index)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   (incf index)
   (let ((escaped-character (char string index))
         (skip-next-backslash-p nil))
@@ -211,10 +220,7 @@ first character after the escaped sequence."
   (declare (type simple-string string)
            (type string-stream parsed-string)
            (type fixnum current-index)
-           (type bitmap-index next-double-quote next-backslash)
-           (dynamic-extent string parsed-string
-                           backslash-bitmap next-backslash)
-           (optimize (speed 3) (safety 1)))
+           (type bitmap-index next-double-quote next-backslash))
   (loop with raw-string-length = (length string)
         with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
         with remaining-string = (- raw-string-length frozen-index)
@@ -247,9 +253,7 @@ first character after the escaped sequence."
 
 (defun %parse-string (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (optimize (speed 3) (safety 1))
-           (dynamic-extent string))
+           (type fixnum index))
   (let ((current-index (incf index)))
     (declare (type fixnum current-index))
     (values
@@ -257,21 +261,19 @@ first character after the escaped sequence."
        (loop with raw-string-length = (length string)
              when (>= current-index raw-string-length)
                do (error 'unmatched-string-delimiter :starting-position (1- index))
-             while (< current-index raw-string-length)
-             ;; `next-' prefix essentially means offset from `current-index'
+                  ;; `next-' prefix essentially means offset from `current-index'
              do (let* ((chunk (chunk string current-index))
-                       (chunk (sb-simd-avx2:s8.32-aref chunk 0))
-                       (double-quote-mask   (sb-simd-avx2:s8.32= chunk +double-quote+))
+                       (chunk (pack chunk))
+
+                       (double-quote-mask   (chunk= chunk +double-quote+))
                        (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
                        (next-double-quote (next-offset double-quote-bitmap))
 
-                       (backslash-mask   (sb-simd-avx2:s8.32= chunk +backslash+))
+                       (backslash-mask   (chunk= chunk +backslash+))
                        (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
                        (next-backslash (next-offset backslash-bitmap)))
                   (declare (type bitmap double-quote-bitmap backslash-bitmap)
-                           (type bitmap-index next-double-quote next-backslash)
-                           (dynamic-extent double-quote-bitmap next-double-quote
-                                           backslash-bitmap next-backslash))
+                           (type bitmap-index next-double-quote next-backslash))
                   (cond
                     ;; the end of the string is known and no escaping is needed
                     ((and next-double-quote
@@ -280,8 +282,8 @@ first character after the escaped sequence."
                      (write-string string
                                    parsed-string
                                    :start current-index
-                                   :end (+ current-index next-double-quote))
-                     (setf current-index (+ current-index next-double-quote 1))
+                                   :end (incf current-index next-double-quote))
+                     (incf current-index)
                      (return))
 
                     ;; no string delimiter found and nothing to unescape, move forward
@@ -306,20 +308,18 @@ first character after the escaped sequence."
 
 (defun end-of-number (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string)
-           (optimize (speed 3) (safety 1)))
-  (loop with string-length = (length string)
-        for current-index from index by +chunk-length+
+           (type fixnum index))
+  (loop with string-length of-type fixnum = (length string)
+        for current-index of-type fixnum from index by +chunk-length+
         while (< current-index string-length)
         do (let* ((chunk (chunk string index))
-                  (chunk (sb-simd-avx2:s8.32-aref chunk 0))
-                  (space-mask   (sb-simd-avx2:s8.32= chunk +space+))
-                  (tab-mask     (sb-simd-avx2:s8.32= chunk +tab+))
-                  (newline-mask (sb-simd-avx2:s8.32= chunk +newline+))
-                  (comma-mask   (sb-simd-avx2:s8.32= chunk +comma+))
-                  (closing-bracket-mask (sb-simd-avx2:s8.32= chunk +closing-bracket+))
-                  (closing-brace-mask   (sb-simd-avx2:s8.32= chunk +closing-brace+))
+                  (chunk (pack chunk))
+                  (space-mask   (chunk= chunk +space+))
+                  (tab-mask     (chunk= chunk +tab+))
+                  (newline-mask (chunk= chunk +newline+))
+                  (comma-mask   (chunk= chunk +comma+))
+                  (closing-bracket-mask (chunk= chunk +closing-bracket+))
+                  (closing-brace-mask   (chunk= chunk +closing-brace+))
                   (whitespace-pack (sb-simd-avx2:u8.32-or space-mask
                                                           tab-mask
                                                           newline-mask
@@ -328,30 +328,28 @@ first character after the escaped sequence."
                                                           closing-brace-mask))
                   (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
              (unless (zerop whitespace-bitmap)
-               (return (+ current-index (rightmost-bit-index whitespace-bitmap)))))
+               (return (incf current-index (rightmost-bit-index whitespace-bitmap)))))
         finally (when (>= current-index string-length)
                   string-length)))
 
 (defun %parse-number (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   ;; NOTE: Even in the hacky approach, this might be worse than traversing the string
   (let ((end-of-number (end-of-number string index))
         (*read-eval* nil))
     ;; HACK: A bit cheesy but it will do for now
-    (read-from-string string
-                      t
-                      nil
-                      :start index
-                      :end end-of-number)))
+    (values
+     (read-from-string string
+                       t
+                       nil
+                       :start index
+                       :end end-of-number)
+     end-of-number)))
 
 (defun %parse-object (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index)))
         (parsed-object (make-hash-table :test 'equal)))
     (declare (type fixnum current-index))
@@ -413,20 +411,16 @@ first character after the escaped sequence."
 
 (defun %parse-null (string index)
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   (if (and (char= #\u (char string (1+ index)))
            (char= #\l (char string (+ index 2)))
            (char= #\l (char string (+ index 3))))
-      (values nil (+ index 4))
+      (values nil (incf index 4))
       (error (format nil "Expected 'null' at position ~a!" index))))
 
 (defun parse (string &optional (index 0))
   (declare (type simple-string string)
-           (type fixnum index)
-           (dynamic-extent string)
-           (optimize (speed 3) (safety 1)))
+           (type fixnum index))
   (let* ((index (skip-to-next-character string index))
          (character (char string index)))
     (cond
@@ -451,13 +445,13 @@ first character after the escaped sequence."
   (5am:is (eql 2 (rightmost-bit-index #b11011100))))
 
 (5am:test :test-skip-whitespace
-  (5am:is (equal '(0 #b1)
-                 (multiple-value-list (skip-whitespace "a" 0))))
-  (5am:is (equal '(nil #b0)
-                 (multiple-value-list (skip-whitespace " " 0)))
+  (5am:is (eql 0
+               (skip-whitespace "a" 0)))
+  (5am:is (null
+           (skip-whitespace " " 0))
           "No non-whitespace characters found")
-  (5am:is (equal '(2 #b100)
-                 (multiple-value-list (skip-whitespace "  a   " 0)))
+  (5am:is (eql 2
+               (skip-whitespace "  a   " 0))
           "Bitmask is reversed & leading zeroes are ommitted."))
 
 (5am:test :test-%parse-string
