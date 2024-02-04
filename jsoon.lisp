@@ -393,14 +393,12 @@ first character after the escaped sequence."
       (return-from %parse-array (values nil current-index)))
 
     (values
-     (loop with new-index and parsed-element
-           with raw-string-length = (length string)
+     (loop with raw-string-length = (length string)
            while (< current-index raw-string-length)
-           do (progn
-                (multiple-value-setq (parsed-element new-index)
-                  (parse string current-index))
-                (setf current-index (skip-to-next-character string new-index)))
-           collect parsed-element
+           collect (multiple-value-bind (parsed-element new-index)
+                       (parse string current-index)
+                     (setf current-index (skip-to-next-character string new-index))
+                     parsed-element)
 
            do (let ((character (char string current-index)))
                 (cond
