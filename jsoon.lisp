@@ -9,8 +9,7 @@
 
 (require :sb-simd)
 
-(setq sb-ext:*block-compile-default* t)
-(declaim (optimize (speed 3) (debug 0) (safety 1) (compilation-speed 0)))
+(declaim (optimize (speed 3) (debug 0) (safety 1)))
 
 (defparameter *data* (uiop:read-file-string "./10mb.json"))
 
@@ -306,10 +305,10 @@ first character after the escaped sequence."
 (defun end-of-number (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (loop with string-length of-type fixnum = (length string)
-        for current-index of-type fixnum from index by +chunk-length+
+  (loop with current-index of-type fixnum = index
+        with string-length of-type fixnum = (length string)
         while (< current-index string-length)
-        do (let* ((chunk (chunk string index))
+        do (let* ((chunk (chunk string current-index))
                   (chunk (pack chunk))
                   (space-mask   (chunk= chunk +space+))
                   (tab-mask     (chunk= chunk +tab+))
@@ -326,14 +325,19 @@ first character after the escaped sequence."
                   (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
              (unless (zerop whitespace-bitmap)
                (return (incf current-index (rightmost-bit-index whitespace-bitmap)))))
+             (if (zerop whitespace-bitmap)
+                 (setf current-index (min (+ current-index +chunk-length+)
+                                          string-length))
+                 (return-from end-of-number (incf current-index (rightmost-bit-index whitespace-bitmap)))))
         finally (when (>= current-index string-length)
-                  string-length)))
+                  (return string-length))))
 
 (defun %parse-number (string index)
   (declare (type simple-string string)
            (type fixnum index))
   ;; NOTE: Even in the hacky approach, this might be worse than traversing the string
   (let ((end-of-number (end-of-number string index))
+        (*read-default-float-format* 'double-float)
         (*read-eval* nil))
     ;; HACK: A bit cheesy but it will do for now
     (values
@@ -360,7 +364,7 @@ first character after the escaped sequence."
            while (< current-index raw-string-length)
            do (progn
                 (when (char/= #\" (char string current-index))
-                  (error (format nil "Key not of type string at  posisiotn ~a!"
+                  (error (format nil "Key not of type string at  position ~a!"
                                  current-index)))
                 (multiple-value-setq (parsed-key new-index)
                   (%parse-string string (incf current-index)))
@@ -421,12 +425,13 @@ first character after the escaped sequence."
   (let* ((index (skip-to-next-character string index))
          (character (char string index)))
     (cond
-      ((char= character #\{)          (%parse-object string index))
-      ((char= character #\[)          (%parse-array string index))
-      ((char= character #\")          (%parse-string string index))
-      ((char= character #\n)          (%parse-null string index))
+      ((char= character #\{) (%parse-object string index))
+      ((char= character #\[) (%parse-array string index))
+      ((char= character #\") (%parse-string string index))
+      ((char= character #\n) (%parse-null string index))
       ((or (digit-char-p character)
-           (char= character #\-))     (%parse-number string index))
+           (char= character #\-))
+       (%parse-number string index))
       (t (error 'unexpected-character :index index
                                       :value character)))))
 
