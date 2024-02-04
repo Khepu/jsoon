@@ -13,21 +13,19 @@
 
 (defparameter *data* (uiop:read-file-string "./10mb.json"))
 
-(defparameter *mock* "   {  \"my-data\":  123}")
+(defconstant +chunk-length+ (the fixnum 16))
 
-(defconstant +chunk-length+ (the fixnum 32))
-
-(defparameter +space+        (sb-simd-avx2:s8.32 (char-code #\space)))
-(defparameter +tab+          (sb-simd-avx2:s8.32 (char-code #\tab)))
-(defparameter +newline+      (sb-simd-avx2:s8.32 (char-code #\newline)))
-(defparameter +double-quote+ (sb-simd-avx2:s8.32 (char-code #\")))
-(defparameter +backslash+    (sb-simd-avx2:s8.32 (char-code #\\)))
-(defparameter +comma+        (sb-simd-avx2:s8.32 (char-code #\,)))
-(defparameter +closing-bracket+ (sb-simd-avx2:s8.32 (char-code #\])))
-(defparameter +closing-brace+   (sb-simd-avx2:s8.32 (char-code #\})))
+(defparameter +space+        (sb-simd-sse4.2:u8.16 (char-code #\space)))
+(defparameter +tab+          (sb-simd-sse4.2:u8.16 (char-code #\tab)))
+(defparameter +newline+      (sb-simd-sse4.2:u8.16 (char-code #\newline)))
+(defparameter +double-quote+ (sb-simd-sse4.2:u8.16 (char-code #\")))
+(defparameter +backslash+    (sb-simd-sse4.2:u8.16 (char-code #\\)))
+(defparameter +comma+        (sb-simd-sse4.2:u8.16 (char-code #\,)))
+(defparameter +closing-bracket+ (sb-simd-sse4.2:u8.16 (char-code #\])))
+(defparameter +closing-brace+   (sb-simd-sse4.2:u8.16 (char-code #\})))
 
 (deftype string-chunk ()
-  `(array (signed-byte 8) (,+chunk-length+)))
+  `(array (unsigned-byte 8) (,+chunk-length+)))
 
 (deftype bitmap ()
   `(unsigned-byte ,+chunk-length+))
@@ -55,22 +53,19 @@
 
 (declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char skip-to-next-character))
 
-
 (defmacro chunk= (chunk value)
-  `(let ((value-mask (sb-simd-avx2:s8.32= (the (sb-ext:simd-pack-256 (signed-byte 8)) ,chunk)
-                                          (the (sb-ext:simd-pack-256 (signed-byte 8)) ,value))))
-     (declare (type (sb-ext:simd-pack-256 (unsigned-byte 8)) value-mask))
+  `(let ((value-mask (sb-simd-sse4.2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
+                                            (the (sb-ext:simd-pack (unsigned-byte 8)) ,value))))
      value-mask))
 
 (defmacro chunk/= (chunk value)
-  `(let ((value-mask (sb-simd-avx2:s8.32/= (the (sb-ext:simd-pack-256 (signed-byte 8)) ,chunk)
-                                           (the (sb-ext:simd-pack-256 (signed-byte 8)) ,value))))
-     (declare (type (sb-ext:simd-pack-256 (unsigned-byte 8)) value-mask))
+  `(let ((value-mask (sb-simd-sse4.2:u8.16-not
+                      (sb-simd-sse4.2:u8.16=  (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
+                                              (the (sb-ext:simd-pack (unsigned-byte 8)) ,value)))))
      value-mask))
 
 (defmacro pack (chunk)
-  `(the (sb-ext:simd-pack-256 (signed-byte 8))
-        (sb-simd-avx2:s8.32-aref ,chunk 0)))
+  `(sb-simd-sse4.2:u8.16-aref ,chunk 0))
 
 (defun rightmost-bit (n)
   (declare (type bitmap n))
@@ -92,7 +87,7 @@
            (type character pad-character)
            (optimize (speed 3) (safety 0)))
   (let ((chunk (make-array (list +chunk-length+)
-                           :element-type '(signed-byte 8)
+                           :element-type '(unsigned-byte 8)
                            :initial-element (char-code pad-character))))
     (declare (type string-chunk chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
@@ -122,11 +117,11 @@
          (tab-mask     (chunk/= chunk +tab+))
          (newline-mask (chunk/= chunk +newline+))
          ;; Equality checks with simd will produce unsigned results of the same length
-         (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
+         (whitespace-pack (sb-simd-sse4.2:u8.16-and space-mask
                                                   tab-mask
                                                   newline-mask))
          ;; The produced mask is backwards
-         (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
+         (whitespace-bitmap (sb-simd-sse4.2:u8.16-movemask whitespace-pack)))
     (unless (zerop whitespace-bitmap)
       (incf index (rightmost-bit-index whitespace-bitmap)))))
 
@@ -264,11 +259,11 @@ first character after the escaped sequence."
                        (chunk (pack chunk))
 
                        (double-quote-mask   (chunk= chunk +double-quote+))
-                       (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
+                       (double-quote-bitmap (sb-simd-sse4.2:u8.16-movemask double-quote-mask))
                        (next-double-quote (next-offset double-quote-bitmap))
 
                        (backslash-mask   (chunk= chunk +backslash+))
-                       (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
+                       (backslash-bitmap (sb-simd-sse4.2:u8.16-movemask backslash-mask))
                        (next-backslash (next-offset backslash-bitmap)))
                   (cond
                     ;; the end of the string is known and no escaping is needed
@@ -316,15 +311,13 @@ first character after the escaped sequence."
                   (comma-mask   (chunk= chunk +comma+))
                   (closing-bracket-mask (chunk= chunk +closing-bracket+))
                   (closing-brace-mask   (chunk= chunk +closing-brace+))
-                  (whitespace-pack (sb-simd-avx2:u8.32-or space-mask
-                                                          tab-mask
-                                                          newline-mask
-                                                          comma-mask
-                                                          closing-bracket-mask
-                                                          closing-brace-mask))
-                  (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-             (unless (zerop whitespace-bitmap)
-               (return (incf current-index (rightmost-bit-index whitespace-bitmap)))))
+                  (whitespace-pack (sb-simd-sse4.2:u8.16-or space-mask
+                                                            tab-mask
+                                                            newline-mask
+                                                            comma-mask
+                                                            closing-bracket-mask
+                                                            closing-brace-mask))
+                  (whitespace-bitmap (sb-simd-sse4.2:u8.16-movemask whitespace-pack)))
              (if (zerop whitespace-bitmap)
                  (setf current-index (min (+ current-index +chunk-length+)
                                           string-length))
