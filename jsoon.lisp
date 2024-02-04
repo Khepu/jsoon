@@ -323,14 +323,13 @@ first character after the escaped sequence."
                                                           closing-bracket-mask
                                                           closing-brace-mask))
                   (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-             (unless (zerop whitespace-bitmap)
-               (return (incf current-index (rightmost-bit-index whitespace-bitmap)))))
              (if (zerop whitespace-bitmap)
                  (setf current-index (min (+ current-index +chunk-length+)
                                           string-length))
-                 (return-from end-of-number (incf current-index (rightmost-bit-index whitespace-bitmap)))))
-        finally (when (>= current-index string-length)
-                  (return string-length))))
+                 (return-from end-of-number
+                   (incf current-index (rightmost-bit-index whitespace-bitmap)))))
+  finally (when (>= current-index string-length)
+            (return string-length))))
 
 (defun %parse-number (string index)
   (declare (type simple-string string)
