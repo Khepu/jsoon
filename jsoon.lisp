@@ -17,17 +17,17 @@
 
 (defconstant +chunk-length+ (the fixnum 32))
 
-(defparameter +space+        (sb-simd-avx2:s8.32 (char-code #\space)))
-(defparameter +tab+          (sb-simd-avx2:s8.32 (char-code #\tab)))
-(defparameter +newline+      (sb-simd-avx2:s8.32 (char-code #\newline)))
-(defparameter +double-quote+ (sb-simd-avx2:s8.32 (char-code #\")))
-(defparameter +backslash+    (sb-simd-avx2:s8.32 (char-code #\\)))
-(defparameter +comma+        (sb-simd-avx2:s8.32 (char-code #\,)))
-(defparameter +closing-bracket+ (sb-simd-avx2:s8.32 (char-code #\])))
-(defparameter +closing-brace+   (sb-simd-avx2:s8.32 (char-code #\})))
+(defparameter +space+        (sb-simd-avx2:u8.32 (char-code #\space)))
+(defparameter +tab+          (sb-simd-avx2:u8.32 (char-code #\tab)))
+(defparameter +newline+      (sb-simd-avx2:u8.32 (char-code #\newline)))
+(defparameter +double-quote+ (sb-simd-avx2:u8.32 (char-code #\")))
+(defparameter +backslash+    (sb-simd-avx2:u8.32 (char-code #\\)))
+(defparameter +comma+        (sb-simd-avx2:u8.32 (char-code #\,)))
+(defparameter +closing-bracket+ (sb-simd-avx2:u8.32 (char-code #\])))
+(defparameter +closing-brace+   (sb-simd-avx2:u8.32 (char-code #\})))
 
 (deftype string-chunk ()
-  `(array (signed-byte 8) (,+chunk-length+)))
+  `(array (unsigned-byte 8) (,+chunk-length+)))
 
 (deftype bitmap ()
   `(unsigned-byte ,+chunk-length+))
@@ -57,20 +57,20 @@
 
 
 (defmacro chunk= (chunk value)
-  `(let ((value-mask (sb-simd-avx2:s8.32= (the (sb-ext:simd-pack-256 (signed-byte 8)) ,chunk)
-                                          (the (sb-ext:simd-pack-256 (signed-byte 8)) ,value))))
+  `(let ((value-mask (sb-simd-avx2:u8.32= (the (sb-ext:simd-pack-256 (unsigned-byte 8)) ,chunk)
+                                          (the (sb-ext:simd-pack-256 (unsigned-byte 8)) ,value))))
      (declare (type (sb-ext:simd-pack-256 (unsigned-byte 8)) value-mask))
      value-mask))
 
 (defmacro chunk/= (chunk value)
-  `(let ((value-mask (sb-simd-avx2:s8.32/= (the (sb-ext:simd-pack-256 (signed-byte 8)) ,chunk)
-                                           (the (sb-ext:simd-pack-256 (signed-byte 8)) ,value))))
+  `(let ((value-mask (sb-simd-avx2:u8.32/= (the (sb-ext:simd-pack-256 (unsigned-byte 8)) ,chunk)
+                                           (the (sb-ext:simd-pack-256 (unsigned-byte 8)) ,value))))
      (declare (type (sb-ext:simd-pack-256 (unsigned-byte 8)) value-mask))
      value-mask))
 
 (defmacro pack (chunk)
-  `(the (sb-ext:simd-pack-256 (signed-byte 8))
-        (sb-simd-avx2:s8.32-aref ,chunk 0)))
+  `(the (sb-ext:simd-pack-256 (unsigned-byte 8))
+        (sb-simd-avx2:u8.32-aref ,chunk 0)))
 
 (defun rightmost-bit (n)
   (declare (type bitmap n))
@@ -80,7 +80,7 @@
 (defun rightmost-bit-index (n)
   "Returns a 0-based index of the location of the rightmost set bit of `n'."
   (declare (type fixnum n))
-  (the fixnum (truncate (the single-float (log (rightmost-bit n) 2)))))
+  (the fixnum (truncate (log (rightmost-bit n) 2))))
 
 (defun unset-rightmost-bit (n)
   (declare (type bitmap n))
@@ -92,7 +92,7 @@
            (type character pad-character)
            (optimize (speed 3) (safety 0)))
   (let ((chunk (make-array (list +chunk-length+)
-                           :element-type '(signed-byte 8)
+                           :element-type '(unsigned-byte 8)
                            :initial-element (char-code pad-character))))
     (declare (type string-chunk chunk))
     (loop with upper-limit = (min (+ index +chunk-length+)
