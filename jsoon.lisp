@@ -443,13 +443,10 @@ first character after the escaped sequence."
   (5am:is (eql 2 (rightmost-bit-index #b11011100))))
 
 (5am:test :test-skip-whitespace
-  (5am:is (eql 0
-               (skip-whitespace "a" 0)))
-  (5am:is (null
-           (skip-whitespace " " 0))
+  (5am:is (eql 0 (skip-whitespace "a" 0)))
+  (5am:is (null (skip-whitespace " " 0))
           "No non-whitespace characters found")
-  (5am:is (eql 2
-               (skip-whitespace "  a   " 0))
+  (5am:is (eql 2 (skip-whitespace "  a   " 0))
           "Bitmask is reversed & leading zeroes are ommitted."))
 
 (5am:test :test-%parse-string
