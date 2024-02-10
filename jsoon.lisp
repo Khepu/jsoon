@@ -70,7 +70,7 @@
 
 (defmacro pack (chunk)
   `(the (sb-ext:simd-pack-256 (unsigned-byte 8))
-        (sb-simd-avx2:u8.32-aref ,chunk 0)))
+        (sb-simd-avx2:u8.32-aref (the string-chunk ,chunk) 0)))
 
 (defun rightmost-bit (n)
   (declare (type bitmap n))
@@ -99,7 +99,7 @@
                                   (length string))
           for i from index below upper-limit
           for j from 0
-          for character = (char-code (char string i))
+          for character = (char-code (schar string i))
           do (setf (aref chunk j) character))
     chunk))
 
@@ -142,8 +142,8 @@
   (declare (type simple-string string)
            (type fixnum index))
   (cond
-    ((not-whitespace-p (char string index))        index)
-    ((not-whitespace-p (char string (incf index))) index)
+    ((not-whitespace-p (schar string index))        index)
+    ((not-whitespace-p (schar string (incf index))) index)
     (t
      (incf index)
      (loop with whitespace-bitmap
@@ -328,13 +328,12 @@ first character after the escaped sequence."
                                           string-length))
                  (return-from end-of-number
                    (incf current-index (rightmost-bit-index whitespace-bitmap)))))
-  finally (when (>= current-index string-length)
-            (return string-length))))
+        finally (when (>= current-index string-length)
+                  (return string-length))))
 
 (defun %parse-number (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  ;; NOTE: Even in the hacky approach, this might be worse than traversing the string
   (let ((end-of-number (end-of-number string index))
         (*read-default-float-format* 'double-float)
         (*read-eval* nil))
@@ -354,7 +353,7 @@ first character after the escaped sequence."
         (parsed-object (make-hash-table :test 'equal)))
     (declare (type fixnum current-index))
     ;; empty object check
-    (when (char= (char string current-index) #\})
+    (when (char= (schar string current-index) #\})
       (return-from %parse-object (values parsed-object current-index)))
     (values
      (loop with new-index
@@ -362,13 +361,13 @@ first character after the escaped sequence."
            with raw-string-length = (length string)
            while (< current-index raw-string-length)
            do (progn
-                (when (char/= #\" (char string current-index))
+                (when (char/= #\" (schar string current-index))
                   (error (format nil "Key not of type string at  position ~a!"
                                  current-index)))
                 (multiple-value-setq (parsed-key new-index)
                   (%parse-string string (incf current-index)))
                 (setf current-index (skip-to-next-character string new-index))
-                (if (char= #\: (char string current-index))
+                (if (char= #\: (schar string current-index))
                     (incf current-index)
                     (error (format nil "Missing ':' after key '~a' at position ~a!"
                                    parsed-key current-index)))
@@ -376,7 +375,7 @@ first character after the escaped sequence."
                   (parse string current-index))
                 (setf current-index (skip-to-next-character string new-index)
                       (gethash parsed-key parsed-object) parsed-value)
-                (let ((character (char string current-index)))
+                (let ((character (schar string current-index)))
                   (cond
                     ((char= #\} character) (return parsed-object))
                     ((char/= #\, character) (error (format nil "Expected ',' after object value. Instead found ~a at position ~a!"
@@ -389,7 +388,7 @@ first character after the escaped sequence."
            (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index))))
     ;; empty array check
-    (when (char= (char string current-index) #\])
+    (when (char= (schar string current-index) #\])
       (return-from %parse-array (values nil current-index)))
 
     (values
@@ -400,7 +399,7 @@ first character after the escaped sequence."
                      (setf current-index (skip-to-next-character string new-index))
                      parsed-element)
 
-           do (let ((character (char string current-index)))
+           do (let ((character (schar string current-index)))
                 (cond
                   ((char= character #\]) (loop-finish))
                   ((char= character #\,) (incf current-index))
@@ -410,9 +409,9 @@ first character after the escaped sequence."
 (defun %parse-null (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (if (and (char= #\u (char string (1+ index)))
-           (char= #\l (char string (+ index 2)))
-           (char= #\l (char string (+ index 3))))
+  (if (and (char= #\u (schar string (1+ index)))
+           (char= #\l (schar string (+ index 2)))
+           (char= #\l (schar string (+ index 3))))
       (values nil (incf index 4))
       (error (format nil "Expected 'null' at position ~a!" index))))
 
@@ -420,7 +419,7 @@ first character after the escaped sequence."
   (declare (type simple-string string)
            (type fixnum index))
   (let* ((index (skip-to-next-character string index))
-         (character (char string index)))
+         (character (schar string index)))
     (cond
       ((char= character #\{) (%parse-object string index))
       ((char= character #\[) (%parse-array string index))
