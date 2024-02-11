@@ -53,8 +53,7 @@
                      (value condition)
                      (index condition)))))
 
-(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char skip-to-next-character))
-
+(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char skip-to-next-character %parse-decimal-segment %parse-exponent-segment))
 
 (defmacro chunk= (chunk value)
   `(let ((value-mask (sb-simd-avx2:u8.32= (the (sb-ext:simd-pack-256 (unsigned-byte 8)) ,chunk)
@@ -173,133 +172,147 @@ characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader
                  :end (+ index 4)
                  :radix 16))
 
-(defun %unescape-char (out string index)
+(defun %unescape-char (string index)
   "Write the unescaped character to `out' and return an `index' pointing at the
 first character after the escaped sequence."
   (declare (type simple-string string)
-           (type string-stream out)
            (type fixnum index))
-  (incf index)
-  (let ((escaped-character (char string index))
+  (let ((escaped-character (schar string (incf index)))
         (skip-next-backslash-p nil))
-    (values (case escaped-character
-              (#\n (prog1 (incf index)
-                     (write-char #\linefeed out)))
-              (#\f (prog1 (incf index)
-                     (write-char #\linefeed out)))
-              (#\b (prog1 (incf index)
-                     (write-char #\backspace out)))
-              (#\r (prog1 (incf index)
-                     (write-char #\return out)))
-              (#\t (prog1 (incf index)
-                     (write-char #\tab out)))
-              (#\u (let ((surrogate (%parse-surrogate string (1+ index)))) ;; skip 'u'
-                     (if (high-surrogate-p surrogate)
-                         (let ((low-surrogate (%parse-surrogate string (+ index 7)))) ;; 4 digits + backslash + 'u' + 1 to skip 'u'
-                           (write-char (surrogate-char surrogate low-surrogate) out)
-                           (setf skip-next-backslash-p t)
-                           (incf index 11))
-                         (prog1 (incf index 5)
-                           (write-char (code-char surrogate) out)))))
-              (#\\ (prog1 (incf index)
-                     (setf skip-next-backslash-p t)
-                     (write-char #\\ out)))
-              (t (prog1 (incf index)
-                   (write-char escaped-character out))))
-            skip-next-backslash-p)))
+    (values
+     (case escaped-character
+       (#\n (progn
+              (incf index)
+              #\linefeed))
+       (#\f (progn
+              (incf index)
+              #\linefeed))
+       (#\b (progn
+              (incf index)
+              #\backspace))
+       (#\r (progn
+              (incf index)
+              #\return))
+       (#\t (progn
+              (incf index)
+              #\tab))
+       (#\u (let ((surrogate (%parse-surrogate string (1+ index)))) ;; skip 'u'
+              (if (high-surrogate-p surrogate)
+                  (let ((low-surrogate (%parse-surrogate string (+ index 7)))) ;; 4 digits + backslash + 'u' + 1 to skip 'u'
+                    (setf skip-next-backslash-p t)
+                    (incf index 11)
+                    (surrogate-char surrogate low-surrogate))
+                  (progn
+                    (incf index 5)
+                    (code-char surrogate)))))
+       (#\\ (progn
+              (incf index)
+              (setf skip-next-backslash-p t)
+              #\\))
+       (t (progn
+            (incf index)
+            escaped-character)))
+     index
+     skip-next-backslash-p)))
 
-(defun %unescape-string (parsed-string
-                         string
+(defun %unescape-string (string
                          current-index
                          double-quote-bitmap
                          next-double-quote
                          backslash-bitmap
                          next-backslash)
   (declare (type simple-string string)
-           (type string-stream parsed-string)
            (type fixnum current-index)
            (type bitmap-index next-double-quote next-backslash))
-  (loop with raw-string-length = (length string)
-        with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
-        with remaining-string = (- raw-string-length frozen-index)
-        with boundary = (min remaining-string (or next-double-quote +chunk-length+))
-        while (and next-backslash (< next-backslash boundary))
-        for backslash-index = (+ frozen-index next-backslash)
-        when (< current-index backslash-index)
-          do (write-string string
-                           parsed-string
-                           :start current-index
-                           :end backslash-index)
-             ;; move to the next double-quote if we just escaped one
-        when (and next-double-quote
-                  (eql 1 (- next-double-quote next-backslash)))
-          do (setf double-quote-bitmap (unset-rightmost-bit double-quote-bitmap)
-                   next-double-quote (next-offset double-quote-bitmap)
-                   boundary (min (or next-double-quote +chunk-length+)
-                                 remaining-string))
-        do (multiple-value-bind (new-index skip-next-backslash-p)
-               (%unescape-char parsed-string string backslash-index)
-             (setf current-index new-index
-                   backslash-bitmap (if skip-next-backslash-p
-                                        (unset-rightmost-bit (unset-rightmost-bit backslash-bitmap))
-                                        (unset-rightmost-bit backslash-bitmap))
-                   next-backslash (next-offset backslash-bitmap)))
-
-        finally (return (values current-index
-                                double-quote-bitmap
-                                next-double-quote))))
+  (values
+   (with-output-to-string (parsed-string)
+     (loop with raw-string-length = (length string)
+           with frozen-index = current-index ;; fixing current index as that was used to generate the initial chunk
+           with remaining-string = (- raw-string-length frozen-index)
+           with boundary = (min remaining-string (or next-double-quote +chunk-length+))
+           while (and next-backslash (< next-backslash boundary))
+           for backslash-index = (the fixnum (+ frozen-index next-backslash))
+           when (< current-index backslash-index)
+             do (write-string string
+                              parsed-string
+                              :start current-index
+                              :end backslash-index)
+                ;; move to the next double-quote if we just escaped one
+           when (and next-double-quote
+                     (eql 1 (- next-double-quote next-backslash)))
+             do (setf double-quote-bitmap (unset-rightmost-bit double-quote-bitmap)
+                      next-double-quote (next-offset double-quote-bitmap)
+                      boundary (min (or next-double-quote +chunk-length+)
+                                    remaining-string))
+           do (multiple-value-bind (unescaped-char new-index skip-next-backslash-p)
+                  (%unescape-char string backslash-index)
+                (write-char unescaped-char parsed-string)
+                (setf current-index new-index
+                      backslash-bitmap (if skip-next-backslash-p
+                                           (unset-rightmost-bit (unset-rightmost-bit backslash-bitmap))
+                                           (unset-rightmost-bit backslash-bitmap))
+                      next-backslash (next-offset backslash-bitmap)))))
+   current-index))
 
 (defun %parse-string (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (let ((current-index (incf index)))
+  (let ((current-index (incf index))
+        (substrings nil))
     (declare (type fixnum current-index))
-    (values
-     (with-output-to-string (parsed-string)
-       (loop with raw-string-length = (length string)
-             when (>= current-index raw-string-length)
-               do (error 'unmatched-string-delimiter :starting-position (1- index))
-                  ;; `next-' prefix essentially means offset from `current-index'
-             do (let* ((chunk (chunk string current-index))
-                       (chunk (pack chunk))
+    (setf substrings
+          (loop with done = nil
+                with raw-string-length = (length string)
+                when (>= current-index raw-string-length)
+                  do (error 'unmatched-string-delimiter :starting-position (1- index))
+                     ;; `next-' prefix essentially means offset from `current-index'
+                collect (let* ((chunk (chunk string current-index))
+                               (chunk (pack chunk))
 
-                       (double-quote-mask   (chunk= chunk +double-quote+))
-                       (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
-                       (next-double-quote (next-offset double-quote-bitmap))
+                               (double-quote-mask   (chunk= chunk +double-quote+))
+                               (double-quote-bitmap (sb-simd-avx2:u8.32-movemask double-quote-mask))
+                               (next-double-quote (next-offset double-quote-bitmap))
 
-                       (backslash-mask   (chunk= chunk +backslash+))
-                       (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
-                       (next-backslash (next-offset backslash-bitmap)))
-                  (cond
-                    ;; the end of the string is known and no escaping is needed
-                    ((and next-double-quote
-                          (or (not next-backslash)
-                              (< next-double-quote next-backslash)))
-                     (write-string string
-                                   parsed-string
-                                   :start current-index
-                                   :end (incf current-index next-double-quote))
-                     (incf current-index)
-                     (loop-finish))
-
-                    ;; no string delimiter found and nothing to unescape, move forward
-                    ((and (not next-double-quote) (not next-backslash))
-                     (write-string string
-                                   parsed-string
-                                   :start current-index
-                                   :end (setf current-index (min raw-string-length
-                                                                 (+ current-index +chunk-length+)))))
-
-                    ((or (and (not next-double-quote) next-backslash)
-                         (> next-double-quote next-backslash))
-                     (multiple-value-setq (current-index double-quote-bitmap next-double-quote)
-                       (%unescape-string parsed-string
-                                         string
+                               (backslash-mask   (chunk= chunk +backslash+))
+                               (backslash-bitmap (sb-simd-avx2:u8.32-movemask backslash-mask))
+                               (next-backslash (next-offset backslash-bitmap)))
+                          (declare (type (or null fixnum) next-double-quote next-backslash))
+                          (cond
+                            ;; the end of the string is known and no escaping is needed
+                            ((and next-double-quote
+                                  (or (not next-backslash)
+                                      (< next-double-quote next-backslash)))
+                             (prog1
+                                 (subseq string
                                          current-index
-                                         double-quote-bitmap
-                                         next-double-quote
-                                         backslash-bitmap
-                                         next-backslash)))))))
+                                         (incf current-index next-double-quote))
+                               (incf current-index)
+                               (setf done t)))
+
+                            ;; no string delimiter found and nothing to unescape, move forward
+                            ((and (not next-double-quote) (not next-backslash))
+                             (subseq string
+                                     current-index
+                                     (setf current-index (min raw-string-length
+                                                              (+ current-index +chunk-length+)))))
+
+                            ((or (and (not next-double-quote) next-backslash)
+                                 (> next-double-quote next-backslash))
+                             (multiple-value-bind (parsed-string new-index)
+                                 (%unescape-string string
+                                                   current-index
+                                                   double-quote-bitmap
+                                                   next-double-quote
+                                                   backslash-bitmap
+                                                   next-backslash)
+                               (setf current-index new-index)
+                               parsed-string))))
+                when done
+                do (loop-finish)))
+    (values
+     (if (> (length substrings) 1)
+         (apply #'concatenate 'string substrings)
+         (car substrings))
      current-index)))
 
 (defun end-of-number (string index)
@@ -396,13 +409,13 @@ first character after the escaped sequence."
       (return-from %parse-object (values parsed-object current-index)))
     (values
      (loop with new-index
-           with parsed-key and parsed-value
+           with parsed-key
            with raw-string-length = (length string)
            while (< current-index raw-string-length)
+           when (char/= #\" (schar string current-index))
+             do (error (format nil "Key not of type string at  position ~a!"
+                                     current-index))
            do (progn
-                (when (char/= #\" (schar string current-index))
-                  (error (format nil "Key not of type string at  position ~a!"
-                                 current-index)))
                 (multiple-value-setq (parsed-key new-index)
                   (%parse-string string current-index))
                 (setf current-index (skip-to-next-character string new-index))
@@ -410,16 +423,16 @@ first character after the escaped sequence."
                     (incf current-index)
                     (error (format nil "Missing ':' after key '~a' at position ~a!"
                                    parsed-key current-index)))
-                (multiple-value-setq (parsed-value new-index)
-                  (parse string current-index))
-                (setf current-index (skip-to-next-character string new-index)
-                      (gethash parsed-key parsed-object) parsed-value)
-                (let ((character (schar string current-index)))
-                  (cond
-                    ((char= #\} character) (return parsed-object))
-                    ((char/= #\, character) (error (format nil "Expected ',' after object value. Instead found ~a at position ~a!"
-                                                           character current-index)))
-                    (t (setf current-index (skip-to-next-character string (incf current-index))))))))
+                (multiple-value-bind (parsed-value new-index)
+                    (parse string current-index)
+                  (setf current-index (skip-to-next-character string new-index)
+                        (gethash parsed-key parsed-object) parsed-value)
+                  (let ((character (schar string current-index)))
+                    (cond
+                      ((char= #\} character) (return parsed-object))
+                      ((char/= #\, character) (error (format nil "Expected ',' after object value. Instead found ~a at position ~a!"
+                                                             character current-index)))
+                      (t (setf current-index (skip-to-next-character string (incf current-index)))))))))
      (incf current-index))))
 
 (defun %parse-array (string index)
