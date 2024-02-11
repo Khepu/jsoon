@@ -331,19 +331,52 @@ first character after the escaped sequence."
         finally (when (>= current-index string-length)
                   (return string-length))))
 
+(defun %parse-exponent-segment (string index number end-of-number)
+  (declare (type simple-string string)
+           (type fixnum index end-of-number))
+  (multiple-value-bind (exponent current-index)
+      (parse-integer string :start index :junk-allowed t)
+      (let ((number (* number (expt 10 exponent))))
+        (if (eql current-index end-of-number)
+            number
+            (error "Malformed number")))))
+
+(defun %parse-decimal-segment (string index integer end-of-number)
+  (declare (type simple-string string)
+           (type fixnum index integer end-of-number))
+  (multiple-value-bind (decimal current-index)
+      (parse-integer string :start index :junk-allowed t)
+    (let ((number (+ integer (/ decimal (expt 10 (- current-index index))))))
+      (if (eql current-index end-of-number)
+          number
+          (%parse-exponent-segment string (incf current-index) number end-of-number)))))
+
 (defun %parse-number (string index)
   (declare (type simple-string string)
            (type fixnum index))
   (let ((end-of-number (end-of-number string index))
         (*read-default-float-format* 'double-float)
         (*read-eval* nil))
-    ;; HACK: A bit cheesy but it will do for now
     (values
-     (read-from-string string
-                       t
-                       nil
-                       :start index
-                       :end end-of-number)
+     ;; Numbers have at most 3 segments. 0.12e-10. The 2 delimiters being `.' and `e'.
+     (multiple-value-bind (integer current-index)
+         (parse-integer string :start index :junk-allowed t)
+       (cond
+         ((eql current-index end-of-number) integer)
+
+         ((char= #\. (schar string current-index))
+          (%parse-decimal-segment string
+                                  (incf current-index)
+                                  integer
+                                  end-of-number))
+
+         ((char= #\e (schar string current-index))
+          (%parse-exponent-segment string
+                                   (incf current-index)
+                                   integer
+                                   end-of-number))
+
+         (t (error "Malformed number"))))
      end-of-number)))
 
 (defun %parse-object (string index)
@@ -365,7 +398,7 @@ first character after the escaped sequence."
                   (error (format nil "Key not of type string at  position ~a!"
                                  current-index)))
                 (multiple-value-setq (parsed-key new-index)
-                  (%parse-string string (incf current-index)))
+                  (%parse-string string current-index))
                 (setf current-index (skip-to-next-character string new-index))
                 (if (char= #\: (schar string current-index))
                     (incf current-index)
