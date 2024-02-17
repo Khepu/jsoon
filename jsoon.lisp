@@ -179,39 +179,27 @@ first character after the escaped sequence."
            (type fixnum index))
   (let ((escaped-character (schar string (incf index)))
         (skip-next-backslash-p nil))
+    (incf index)
     (values
      (case escaped-character
-       (#\n (progn
-              (incf index)
-              #\linefeed))
-       (#\f (progn
-              (incf index)
-              #\linefeed))
-       (#\b (progn
-              (incf index)
-              #\backspace))
-       (#\r (progn
-              (incf index)
-              #\return))
-       (#\t (progn
-              (incf index)
-              #\tab))
-       (#\u (let ((surrogate (%parse-surrogate string (1+ index)))) ;; skip 'u'
+       (#\n #\linefeed)
+       (#\f #\linefeed)
+       (#\b #\backspace)
+       (#\r #\return)
+       (#\t #\tab)
+       (#\u (let ((surrogate (%parse-surrogate string index))) ;; skip 'u'
               (if (high-surrogate-p surrogate)
-                  (let ((low-surrogate (%parse-surrogate string (+ index 7)))) ;; 4 digits + backslash + 'u' + 1 to skip 'u'
+                  (let ((low-surrogate (%parse-surrogate string (+ index 6)))) ;; 4 digits + backslash + 'u' + 1 to skip 'u'
                     (setf skip-next-backslash-p t)
-                    (incf index 11)
+                    (incf index 10)
                     (surrogate-char surrogate low-surrogate))
                   (progn
-                    (incf index 5)
+                    (incf index 4)
                     (code-char surrogate)))))
        (#\\ (progn
-              (incf index)
               (setf skip-next-backslash-p t)
               #\\))
-       (t (progn
-            (incf index)
-            escaped-character)))
+       (t escaped-character))
      index
      skip-next-backslash-p)))
 
