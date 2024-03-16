@@ -548,3 +548,14 @@ first character after the escaped sequence."
   (5am:is (equal `(1 nil (3 (,(format nil "~%"))) 5 nil)
                  (%parse-array "[1,null,[3, [\"\\n\"]],5, null]" 0))
           "Nulls"))
+
+(5am:test :test-%parse-number
+  (5am:is (= 5
+             (%parse-number "5.000" 0)))
+  (5am:is (= 100
+             (%parse-number "1e2" 0)))
+
+  (5am:is (= 120
+             (%parse-number "1.2e2" 0)))
+  (5am:is (= 1.2d0
+             (%parse-number "120.0e-2" 0))))
