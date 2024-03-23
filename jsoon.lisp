@@ -1,12 +1,3 @@
-(eval-when (:load-toplevel)
-  (require :sb-simd)
-  (ql:quickload :jsown)
-  (ql:quickload :uiop)
-  (ql:quickload :fiveam))
-
-(defpackage :jsoon
-  (:use #:cl #:uiop #:fiveam))
-
 (in-package :jsoon)
 
 
@@ -30,13 +21,6 @@
 (deftype string-chunk ()
   `(array (unsigned-byte 8) (,+chunk-length+)))
 
-(deftype bitmap ()
-  `(unsigned-byte ,+chunk-length+))
-
-(deftype bitmap-index ()
-  `(or null
-      (unsigned-byte ,(truncate (log +chunk-length+ 2)))))
-
 (define-condition unmatched-string-delimiter (error)
   ((starting-position :initarg :starting-position
                       :accessor starting-position))
@@ -54,7 +38,7 @@
                      (value condition)
                      (index condition)))))
 
-(declaim (inline rightmost-bit rightmost-bit-index unset-rightmost-bit chunk
+(declaim (inline rightmost-bit unset-rightmost-bit chunk
                  %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char
                  skip-to-next-character %parse-decimal-segment %parse-exponent-segment
                  not-whitespace-p end-of-number %parse-number))
@@ -80,17 +64,12 @@
         (sb-simd-avx2:u8.32-aref (the string-chunk ,chunk) 0)))
 
 (defun rightmost-bit (n)
-  (declare (type bitmap n))
-  (logand (1+ (lognot n))
-          n))
-
-(defun rightmost-bit-index (n)
-  "Returns a 0-based index of the location of the rightmost set bit of `n'."
   (declare (type fixnum n))
-  (the fixnum (truncate (log (rightmost-bit n) 2))))
+  (the fixnum (logand (1+ (lognot n))
+                      n)))
 
 (defun unset-rightmost-bit (n)
-  (declare (type bitmap n))
+  (declare (type fixnum n))
   (logxor n (rightmost-bit n)))
 
 (defun chunk (string index &optional (pad-character #\Nul))
@@ -106,36 +85,15 @@
                                   (length string))
           for i from index below upper-limit
           for j from 0
-          for character = (char-code (schar string i))
+          for character = (char-code (char string i))
           do (setf (aref chunk j) character))
     chunk))
 
 (defun next-offset (bitmap)
   "Returns the rightmost bit index (0-based) if `bitmap' > 0, otherwise NIL"
-  (declare (type bitmap bitmap))
+  (declare (type fixnum bitmap))
   (unless (zerop bitmap)
-    (rightmost-bit-index bitmap)))
-
-(defun skip-whitespace (string index)
-  "Skips to the first non-whitespace character."
-  (declare (type simple-string string)
-           (type fixnum index))
-  ;; Padding with a spaces to make detection of chunks with just whitespace
-  ;; easier when they are less than `+chunk-length+'.
-  (let* ((chunk (chunk string index #\space))
-         ;; Packing here instead of inside `chunk' to avoid pointer coercion
-         (chunk (pack chunk))
-         (space-mask   (chunk/= chunk +space+))
-         (tab-mask     (chunk/= chunk +tab+))
-         (newline-mask (chunk/= chunk +newline+))
-         ;; Equality checks with simd will produce unsigned results of the same length
-         (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
-                                                  tab-mask
-                                                  newline-mask))
-         ;; The produced mask is backwards
-         (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-    (unless (zerop whitespace-bitmap)
-      (incf index (rightmost-bit-index whitespace-bitmap)))))
+    (bit-scan-forward bitmap)))
 
 (defun not-whitespace-p (character)
   (declare (type character character)
@@ -149,16 +107,27 @@
   (declare (type simple-string string)
            (type fixnum index))
   (cond
-    ((not-whitespace-p (schar string index))        index)
-    ((not-whitespace-p (schar string (incf index))) index)
+    ((not-whitespace-p (char string index))        index)
+    ((not-whitespace-p (char string (incf index))) index)
     (t
      (incf index)
-     (loop with whitespace-bitmap
-           for new-index = (skip-whitespace string index)
-           unless new-index
-             do (incf index +chunk-length+)
-           until new-index
-           finally (return new-index)))))
+     (loop do ;; Padding with a spaces to make detection of chunks with just whitespace
+              ;; easier when they are less than `+chunk-length+'.
+              (let* ((chunk (chunk string index #\space))
+                     ;; Packing here instead of inside `chunk' to avoid pointer coercion
+                     (chunk (pack chunk))
+                     (space-mask   (chunk/= chunk +space+))
+                     (tab-mask     (chunk/= chunk +tab+))
+                     (newline-mask (chunk/= chunk +newline+))
+                     ;; Equality checks with simd will produce unsigned results of the same length
+                     (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
+                                                              tab-mask
+                                                              newline-mask))
+                     ;; The produced mask is backwards
+                     (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
+                (if (zerop whitespace-bitmap)
+                    (incf index +chunk-length+)
+                    (return (incf index (bit-scan-forward whitespace-bitmap)))))))))
 
 (defun high-surrogate-p (code-value)
   "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
@@ -185,7 +154,7 @@ characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader
 first character after the escaped sequence."
   (declare (type simple-string string)
            (type fixnum index))
-  (let ((escaped-character (schar string (incf index)))
+  (let ((escaped-character (char string (incf index)))
         (skip-next-backslash-p nil))
     (incf index)
     (values
@@ -257,54 +226,53 @@ first character after the escaped sequence."
         (substrings nil)
         (chunk))
     (declare (type fixnum current-index)
-             (dynamic-extent chunk))
+             (dynamic-extent chunk substrings))
     (setf substrings
           (loop with done = nil
                 with raw-string-length = (length string)
                 when (>= current-index raw-string-length)
                   do (error 'unmatched-string-delimiter :starting-position (1- index))
                      ;; `next-' prefix essentially means offset from `current-index'
-                collect (progn (setf chunk (chunk string current-index))
-                               (let* ((chunk (pack chunk))
+                collect (progn
+                          (setf chunk (chunk string current-index))
+                          (let* ((chunk (pack chunk))
+                                 (double-quote-bitmap (chunk=->bm chunk +double-quote+))
+                                 (next-double-quote (next-offset double-quote-bitmap))
+                                 (backslash-bitmap   (chunk=->bm chunk +backslash+))
+                                 (next-backslash (next-offset backslash-bitmap)))
+                            (declare (type (or null fixnum) next-double-quote next-backslash)
+                                     (dynamic-extent next-double-quote next-backslash chunk
+                                                     double-quote-bitmap backslash-bitmap))
+                            (cond
+                              ;; the end of the string is known and no escaping is needed
+                              ((and next-double-quote
+                                    (or (not next-backslash)
+                                        (< next-double-quote next-backslash)))
+                               (prog1
+                                   (subseq string
+                                           current-index
+                                           (incf current-index next-double-quote))
+                                 (incf current-index)
+                                 (setf done t)))
 
-                                      (double-quote-bitmap (chunk=->bm chunk +double-quote+))
-                                      (next-double-quote (next-offset double-quote-bitmap))
+                              ;; no string delimiter found and nothing to unescape, move forward
+                              ((and (not next-double-quote) (not next-backslash))
+                               (subseq string
+                                       current-index
+                                       (setf current-index (min raw-string-length
+                                                                (+ current-index +chunk-length+)))))
 
-                                      (backslash-bitmap   (chunk=->bm chunk +backslash+))
-                                      (next-backslash (next-offset backslash-bitmap)))
-                                 (declare (type (or null fixnum) next-double-quote next-backslash)
-                                          (dynamic-extent next-double-quote next-backslash chunk
-                                                          double-quote-bitmap backslash-bitmap))
-                                 (cond
-                                   ;; the end of the string is known and no escaping is needed
-                                   ((and next-double-quote
-                                         (or (not next-backslash)
-                                             (< next-double-quote next-backslash)))
-                                    (prog1
-                                        (subseq string
-                                                current-index
-                                                (incf current-index next-double-quote))
-                                      (incf current-index)
-                                      (setf done t)))
-
-                                   ;; no string delimiter found and nothing to unescape, move forward
-                                   ((and (not next-double-quote) (not next-backslash))
-                                    (subseq string
-                                            current-index
-                                            (setf current-index (min raw-string-length
-                                                                     (+ current-index +chunk-length+)))))
-
-                                   ((or (and (not next-double-quote) next-backslash)
-                                        (> next-double-quote next-backslash))
-                                    (multiple-value-bind (parsed-string new-index)
-                                        (%unescape-string string
-                                                          current-index
-                                                          double-quote-bitmap
-                                                          next-double-quote
-                                                          backslash-bitmap
-                                                          next-backslash)
-                                      (setf current-index new-index)
-                                      parsed-string)))))
+                              ((or (and (not next-double-quote) next-backslash)
+                                   (> next-double-quote next-backslash))
+                               (multiple-value-bind (parsed-string new-index)
+                                   (%unescape-string string
+                                                     current-index
+                                                     double-quote-bitmap
+                                                     next-double-quote
+                                                     backslash-bitmap
+                                                     next-backslash)
+                                 (setf current-index new-index)
+                                 parsed-string)))))
                 when done
                 do (loop-finish)))
     (values
@@ -313,133 +281,90 @@ first character after the escaped sequence."
          (car substrings))
      current-index)))
 
-(defun end-of-number (string index)
+(defun %parse-exponent-segment (string index number)
   (declare (type simple-string string)
-           (type fixnum index))
-  (loop with current-index of-type fixnum = index
-        with string-length of-type fixnum = (length string)
-        while (< current-index string-length)
-        do (let* ((chunk (chunk string current-index))
-                  (chunk (pack chunk))
-                  (space-mask   (chunk= chunk +space+))
-                  (tab-mask     (chunk= chunk +tab+))
-                  (newline-mask (chunk= chunk +newline+))
-                  (comma-mask   (chunk= chunk +comma+))
-                  (closing-bracket-mask (chunk= chunk +closing-bracket+))
-                  (closing-brace-mask   (chunk= chunk +closing-brace+))
-                  (whitespace-pack (sb-simd-avx2:u8.32-or space-mask
-                                                          tab-mask
-                                                          newline-mask
-                                                          comma-mask
-                                                          closing-bracket-mask
-                                                          closing-brace-mask))
-                  (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-             (if (zerop whitespace-bitmap)
-                 (setf current-index (min (+ current-index +chunk-length+)
-                                          string-length))
-                 (return-from end-of-number
-                   (incf current-index (rightmost-bit-index whitespace-bitmap)))))
-        finally (when (>= current-index string-length)
-                  (return string-length))))
-
-(defun %parse-exponent-segment (string index number end-of-number)
-  (declare (type simple-string string)
-           (type fixnum index end-of-number)
+           (type fixnum index)
            (type double-float number))
   (multiple-value-bind (exponent current-index)
       (parse-integer string :start index :junk-allowed t)
-    (declare (type fixnum exponent))
+    (declare (type fixnum exponent current-index))
     (let ((number (* number (expt 10.0d0 exponent))))
       (declare (type double-float number))
-      (if (eql current-index end-of-number)
-          number
-          (error "Malformed number")))))
+      (values number current-index))))
 
-(defun %parse-decimal-segment (string index integer end-of-number)
+(defun %parse-decimal-segment (string index integer)
   (declare (type simple-string string)
-           (type fixnum index integer end-of-number))
+           (type fixnum index integer))
   (multiple-value-bind (decimal current-index)
       (parse-integer string :start index :junk-allowed t)
-    (declare (type fixnum decimal))
+    (declare (type fixnum decimal current-index))
     (let ((number (+ integer (/ decimal (expt 10.0d0 (- current-index index))))))
       (declare (type double-float number))
-      (if (eql current-index end-of-number)
-          number
+      (if (and current-index (eql #\e (char string current-index)))
           (%parse-exponent-segment string
                                    (incf current-index)
-                                   number
-                                   end-of-number)))))
+                                   number)
+          (values number current-index)))))
 
 (defun %parse-number (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (let ((end-of-number (end-of-number string index)))
-    (values
-     ;; Numbers have at most 3 segments. 0.12e-10. The 2 delimiters being `.' and `e'.
-     (multiple-value-bind (integer current-index)
-         (parse-integer string :start index :junk-allowed t)
-       (declare (type fixnum integer))
-       (cond
-         ((eql current-index end-of-number) integer)
-
-         ((char= #\. (schar string current-index))
-          (%parse-decimal-segment string
-                                  (incf current-index)
-                                  integer
-                                  end-of-number))
-
-         ((char= #\e (schar string current-index))
-          (%parse-exponent-segment string
-                                   (incf current-index)
-                                   (coerce integer 'double-float)
-                                   end-of-number))
-
-         (t (error "Malformed number"))))
-     end-of-number)))
+  ;; Numbers have at most 3 segments. 0.12e-10. The 2 delimiters being `.' and `e'.
+  (multiple-value-bind (integer current-index)
+      (parse-integer string :start index :junk-allowed t)
+    (declare (type fixnum integer))
+    (if (and current-index (eql #\. (char string current-index)))
+        (%parse-decimal-segment string
+                                (incf current-index)
+                                integer)
+        (if (and current-index (eql #\e (char string current-index)))
+            (%parse-exponent-segment string
+                                     (incf current-index)
+                                     (coerce integer 'double-float))
+            (values integer current-index)))))
 
 (defun %parse-object (string index)
   (declare (type simple-string string)
            (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index)))
-        (parsed-object (make-hash-table :test 'equal)))
+        (parsed-object (make-hash-table :test 'equal
+                                        :size 10
+                                        :rehash-size 2
+                                        :rehash-threshold 1)))
     (declare (type fixnum current-index))
     ;; empty object check
-    (when (char= (schar string current-index) #\})
+    (when (eql (char string current-index) #\})
       (return-from %parse-object (values parsed-object current-index)))
-    (values
-     (loop with new-index
-           with parsed-key
-           with raw-string-length = (length string)
-           while (< current-index raw-string-length)
-           when (char/= #\" (schar string current-index))
-             do (error (format nil "Key not of type string at  position ~a!"
-                                     current-index))
-           do (progn
-                (multiple-value-setq (parsed-key new-index)
-                  (%parse-string string current-index))
-                (setf current-index (skip-to-next-character string new-index))
-                (if (char= #\: (schar string current-index))
-                    (incf current-index)
-                    (error (format nil "Missing ':' after key '~a' at position ~a!"
-                                   parsed-key current-index)))
-                (multiple-value-bind (parsed-value new-index)
-                    (parse string current-index)
-                  (setf current-index (skip-to-next-character string new-index)
-                        (gethash parsed-key parsed-object) parsed-value)
-                  (let ((character (schar string current-index)))
-                    (cond
-                      ((char= #\} character) (return parsed-object))
-                      ((char/= #\, character) (error (format nil "Expected ',' after object value. Instead found ~a at position ~a!"
-                                                             character current-index)))
-                      (t (setf current-index (skip-to-next-character string (incf current-index)))))))))
-     (incf current-index))))
+    (loop with raw-string-length = (length string)
+          while (< current-index raw-string-length)
+          when (char/= #\" (char string current-index))
+            do (error "Key not of type string at  position ~a!" current-index)
+          do (multiple-value-bind (parsed-key new-index)
+                 (%parse-string string current-index)
+               (setf current-index (skip-to-next-character string new-index))
+               (if (eql #\: (char string current-index))
+                   (incf current-index)
+                   (error "Missing ':' after key '~a' at position ~a!" parsed-key current-index))
+               (multiple-value-bind (parsed-value new-index)
+                   (parse string current-index)
+                 (setf current-index (skip-to-next-character string new-index)
+                       (gethash parsed-key parsed-object) parsed-value)
+                 (let ((character (char string current-index)))
+                   (declare (dynamic-extent character)
+                            (type character character))
+                   (cond
+                     ((eql #\} character) (loop-finish))
+                     ((char/= #\, character) (error "Expected ',' after object value. Instead found ~a at position ~a!"
+                                                    character current-index))
+                     (t (setf current-index (skip-to-next-character string (incf current-index)))))))))
+    (values parsed-object (incf current-index))))
 
 (defun %parse-array (string index)
   (declare (type simple-string string)
            (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index))))
     ;; empty array check
-    (when (char= (schar string current-index) #\])
+    (when (eql (char string current-index) #\])
       (return-from %parse-array (values nil current-index)))
 
     (values
@@ -449,35 +374,40 @@ first character after the escaped sequence."
                        (parse string current-index)
                      (setf current-index (skip-to-next-character string new-index))
                      parsed-element)
-
-           do (let ((character (schar string current-index)))
+           do (let ((character (char string current-index)))
+                (declare (dynamic-extent character)
+                         (type character character))
                 (cond
-                  ((char= character #\]) (loop-finish))
-                  ((char= character #\,) (incf current-index))
-                  (t (error (format nil "Missing array delimiter at position ~a!" current-index))))))
+                  ((eql character #\]) (loop-finish))
+                  ((eql character #\,) (incf current-index))
+                  (t (error "Missing array delimiter at position ~a!" current-index)))))
      (incf current-index))))
 
 (defun %parse-null (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (if (and (char= #\u (schar string (1+ index)))
-           (char= #\l (schar string (+ index 2)))
-           (char= #\l (schar string (+ index 3))))
+  (if (and (eql #\u (char string (1+ index)))
+           (eql #\l (char string (+ index 2)))
+           (eql #\l (char string (+ index 3))))
       (values nil (incf index 4))
-      (error (format nil "Expected 'null' at position ~a!" index))))
+      (error "Expected 'null' at position ~a!" index)))
 
-(defun parse (string &optional (index 0))
+(defun parse (string &optional (index 0) (skip-p t))
   (declare (type simple-string string)
            (type fixnum index))
-  (let* ((index (skip-to-next-character string index))
-         (character (schar string index)))
+  (let* ((index (if skip-p
+                    (skip-to-next-character string index)
+                    index))
+         (character (char string index)))
+    (declare (dynamic-extent character)
+             (type character character))
     (cond
-      ((char= character #\{) (%parse-object string index))
-      ((char= character #\[) (%parse-array string index))
-      ((char= character #\") (%parse-string string index))
-      ((char= character #\n) (%parse-null string index))
+      ((eql character #\{) (%parse-object string index))
+      ((eql character #\[) (%parse-array string index))
+      ((eql character #\") (%parse-string string index))
+      ((eql character #\n) (%parse-null string index))
       ((or (digit-char-p character)
-           (char= character #\-))
+           (eql character #\-))
        (%parse-number string index))
       (t (error 'unexpected-character :index index
                                       :value character)))))
@@ -488,10 +418,10 @@ first character after the escaped sequence."
 
 (5am:def-suite :jsoon-tests)
 
-(5am:test :test-rightmost-bit-index
-  (5am:is (eql 0 (rightmost-bit-index #b1)))
-  (5am:is (eql 2 (rightmost-bit-index #b100)))
-  (5am:is (eql 2 (rightmost-bit-index #b11011100))))
+(5am:test :test-bit-scan-forward
+  (5am:is (eql 0 (bit-scan-forward #b1)))
+  (5am:is (eql 2 (bit-scan-forward #b100)))
+  (5am:is (eql 2 (bit-scan-forward #b11011100))))
 
 (5am:test :test-skip-whitespace
   (5am:is (eql 0 (skip-whitespace "a" 0)))
@@ -554,7 +484,6 @@ first character after the escaped sequence."
              (%parse-number "5.000" 0)))
   (5am:is (= 100
              (%parse-number "1e2" 0)))
-
   (5am:is (= 120
              (%parse-number "1.2e2" 0)))
   (5am:is (= 1.2d0
