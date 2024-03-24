@@ -98,10 +98,9 @@
 (defun not-whitespace-p (character)
   (declare (type character character)
            (optimize (speed 3) (safety 0)))
-  (let ((character (char-code character)))
-    (not (or (eql character #.(char-code #\space))
-             (eql character #.(char-code #\tab))
-             (eql character #.(char-code #\newline))))))
+  (not (or (char= character #\space)
+           (char= character #\tab)
+           (char= character #\newline))))
 
 (defun skip-to-next-character (string index)
   (declare (type simple-string string)
@@ -119,15 +118,12 @@
                      (space-mask   (chunk/= chunk +space+))
                      (tab-mask     (chunk/= chunk +tab+))
                      (newline-mask (chunk/= chunk +newline+))
-                     ;; Equality checks with simd will produce unsigned results of the same length
                      (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
                                                               tab-mask
                                                               newline-mask))
-                     ;; The produced mask is backwards
                      (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-                (if (zerop whitespace-bitmap)
-                    (incf index +chunk-length+)
-                    (return (incf index (bit-scan-forward whitespace-bitmap)))))))))
+                (incf index (or (next-offset whitespace-bitmap)
+                                +chunk-length+)))))))
 
 (defun high-surrogate-p (code-value)
   "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
@@ -300,7 +296,7 @@ first character after the escaped sequence."
     (declare (type fixnum decimal current-index))
     (let ((number (+ integer (/ decimal (expt 10.0d0 (- current-index index))))))
       (declare (type double-float number))
-      (if (and current-index (eql #\e (char string current-index)))
+      (if (and current-index (char= #\e (char string current-index)))
           (%parse-exponent-segment string
                                    (incf current-index)
                                    number)
@@ -313,11 +309,11 @@ first character after the escaped sequence."
   (multiple-value-bind (integer current-index)
       (parse-integer string :start index :junk-allowed t)
     (declare (type fixnum integer))
-    (if (and current-index (eql #\. (char string current-index)))
+    (if (and current-index (char= #\. (char string current-index)))
         (%parse-decimal-segment string
                                 (incf current-index)
                                 integer)
-        (if (and current-index (eql #\e (char string current-index)))
+        (if (and current-index (char= #\e (char string current-index)))
             (%parse-exponent-segment string
                                      (incf current-index)
                                      (coerce integer 'double-float))
@@ -333,7 +329,7 @@ first character after the escaped sequence."
                                         :rehash-threshold 1)))
     (declare (type fixnum current-index))
     ;; empty object check
-    (when (eql (char string current-index) #\})
+    (when (char= (char string current-index) #\})
       (return-from %parse-object (values parsed-object current-index)))
     (loop with raw-string-length = (length string)
           while (< current-index raw-string-length)
@@ -342,7 +338,7 @@ first character after the escaped sequence."
           do (multiple-value-bind (parsed-key new-index)
                  (%parse-string string current-index)
                (setf current-index (skip-to-next-character string new-index))
-               (if (eql #\: (char string current-index))
+               (if (char= #\: (char string current-index))
                    (incf current-index)
                    (error "Missing ':' after key '~a' at position ~a!" parsed-key current-index))
                (multiple-value-bind (parsed-value new-index)
@@ -353,7 +349,7 @@ first character after the escaped sequence."
                    (declare (dynamic-extent character)
                             (type character character))
                    (cond
-                     ((eql #\} character) (loop-finish))
+                     ((char= #\} character) (loop-finish))
                      ((char/= #\, character) (error "Expected ',' after object value. Instead found ~a at position ~a!"
                                                     character current-index))
                      (t (setf current-index (skip-to-next-character string (incf current-index)))))))))
@@ -364,7 +360,7 @@ first character after the escaped sequence."
            (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index))))
     ;; empty array check
-    (when (eql (char string current-index) #\])
+    (when (char= (char string current-index) #\])
       (return-from %parse-array (values nil current-index)))
 
     (values
@@ -378,17 +374,17 @@ first character after the escaped sequence."
                 (declare (dynamic-extent character)
                          (type character character))
                 (cond
-                  ((eql character #\]) (loop-finish))
-                  ((eql character #\,) (incf current-index))
+                  ((char= character #\]) (loop-finish))
+                  ((char= character #\,) (incf current-index))
                   (t (error "Missing array delimiter at position ~a!" current-index)))))
      (incf current-index))))
 
 (defun %parse-null (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (if (and (eql #\u (char string (1+ index)))
-           (eql #\l (char string (+ index 2)))
-           (eql #\l (char string (+ index 3))))
+  (if (and (char= #\u (char string (1+ index)))
+           (char= #\l (char string (+ index 2)))
+           (char= #\l (char string (+ index 3))))
       (values nil (incf index 4))
       (error "Expected 'null' at position ~a!" index)))
 
@@ -402,12 +398,12 @@ first character after the escaped sequence."
     (declare (dynamic-extent character)
              (type character character))
     (cond
-      ((eql character #\{) (%parse-object string index))
-      ((eql character #\[) (%parse-array string index))
-      ((eql character #\") (%parse-string string index))
-      ((eql character #\n) (%parse-null string index))
+      ((char= character #\{) (%parse-object string index))
+      ((char= character #\[) (%parse-array string index))
+      ((char= character #\") (%parse-string string index))
+      ((char= character #\n) (%parse-null string index))
       ((or (digit-char-p character)
-           (eql character #\-))
+           (char= character #\-))
        (%parse-number string index))
       (t (error 'unexpected-character :index index
                                       :value character)))))
