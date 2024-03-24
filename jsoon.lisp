@@ -135,7 +135,7 @@ characters. (Stolen from https://github.com/madnificent/jsown/blob/master/reader
   (declare (type fixnum high-surrogate low-surrogate))
   (code-char (+ #x10000
                 (decf low-surrogate #xDC00)
-                (ash (decf high-surrogate #xD800) 10))))
+                (the fixnum (ash (decf high-surrogate #xD800) 10)))))
 
 (defun %parse-surrogate (string index)
   (declare (type simple-string string)
