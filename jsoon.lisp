@@ -95,6 +95,33 @@
   (unless (zerop bitmap)
     (bit-scan-forward bitmap)))
 
+(defun skip-whitespace (string index)
+  "Skips to the first non-whitespace character."
+  (declare (type simple-string string)
+           (type fixnum index))
+  (loop with string-length = (length string)
+        if (< index string-length)
+          do ;; Padding with a spaces to make detection of chunks with just whitespace
+             ;; easier when they are less than `+chunk-length+'.
+             (let* ((chunk (chunk string index #\space))
+                    ;; Packing here instead of inside `chunk' to avoid pointer coercion
+                    (chunk (pack chunk))
+                    (space-mask   (chunk/= chunk +space+))
+                    (tab-mask     (chunk/= chunk +tab+))
+                    (newline-mask (chunk/= chunk +newline+))
+                    ;; Equality checks with simd will produce unsigned results of the same length
+                    (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
+                                                             tab-mask
+                                                             newline-mask))
+                    ;; The produced mask is backwards
+                    (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
+               (declare (type fixnum whitespace-bitmap))
+               (if (zerop whitespace-bitmap)
+                   (incf index +chunk-length+)
+                   (return (incf index (bit-scan-forward whitespace-bitmap)))))
+        else
+          do (return string-length)))
+
 (defun not-whitespace-p (character)
   (declare (type character character)
            (optimize (speed 3) (safety 0)))
@@ -106,24 +133,9 @@
   (declare (type simple-string string)
            (type fixnum index))
   (cond
-    ((not-whitespace-p (char string index))        index)
-    ((not-whitespace-p (char string (incf index))) index)
-    (t
-     (incf index)
-     (loop do ;; Padding with a spaces to make detection of chunks with just whitespace
-              ;; easier when they are less than `+chunk-length+'.
-              (let* ((chunk (chunk string index #\space))
-                     ;; Packing here instead of inside `chunk' to avoid pointer coercion
-                     (chunk (pack chunk))
-                     (space-mask   (chunk/= chunk +space+))
-                     (tab-mask     (chunk/= chunk +tab+))
-                     (newline-mask (chunk/= chunk +newline+))
-                     (whitespace-pack (sb-simd-avx2:u8.32-and space-mask
-                                                              tab-mask
-                                                              newline-mask))
-                     (whitespace-bitmap (sb-simd-avx2:u8.32-movemask whitespace-pack)))
-                (incf index (or (next-offset whitespace-bitmap)
-                                +chunk-length+)))))))
+    ((not-whitespace-p (schar string index))        index)
+    ((not-whitespace-p (schar string (incf index))) index)
+    (t (skip-whitespace string (incf index)))))
 
 (defun high-surrogate-p (code-value)
   "Character numbers between U+D800 and U+DFFF (inclusive) are reserved for use
@@ -183,7 +195,8 @@ first character after the escaped sequence."
                          backslash-bitmap
                          next-backslash)
   (declare (type simple-string string)
-           (type fixnum current-index next-double-quote next-backslash))
+           (type fixnum current-index)
+           (type (or null fixnum) next-double-quote next-backslash))
   (values
    (with-output-to-string (parsed-string)
      (loop with raw-string-length = (length string)
@@ -218,7 +231,10 @@ first character after the escaped sequence."
 (defun %parse-string (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (let ((current-index (incf index))
+  (incf index)
+  (when (char= #\" (char string index))
+    (return-from %parse-string (values "" index)))
+  (let ((current-index index)
         (substrings nil)
         (chunk))
     (declare (type fixnum current-index)
@@ -230,12 +246,13 @@ first character after the escaped sequence."
                   do (error 'unmatched-string-delimiter :starting-position (1- index))
                      ;; `next-' prefix essentially means offset from `current-index'
                 collect (progn
+                          (format nil "current-index: ~a~%" current-index)
                           (setf chunk (chunk string current-index))
                           (let* ((chunk (pack chunk))
                                  (double-quote-bitmap (chunk=->bm chunk +double-quote+))
-                                 (next-double-quote (next-offset double-quote-bitmap))
+                                 (next-double-quote (next-offset (the fixnum double-quote-bitmap)))
                                  (backslash-bitmap   (chunk=->bm chunk +backslash+))
-                                 (next-backslash (next-offset backslash-bitmap)))
+                                 (next-backslash (next-offset (the fixnum backslash-bitmap))))
                             (declare (type (or null fixnum) next-double-quote next-backslash)
                                      (dynamic-extent next-double-quote next-backslash chunk
                                                      double-quote-bitmap backslash-bitmap))
@@ -358,11 +375,10 @@ first character after the escaped sequence."
 (defun %parse-array (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (let ((current-index (skip-to-next-character string (1+ index))))
+  (let ((current-index (skip-to-next-character string (incf index))))
     ;; empty array check
     (when (char= (char string current-index) #\])
-      (return-from %parse-array (values nil current-index)))
-
+      (return-from %parse-array (values nil (incf current-index))))
     (values
      (loop with raw-string-length = (length string)
            while (< current-index raw-string-length)
@@ -414,14 +430,19 @@ first character after the escaped sequence."
 
 (5am:def-suite :jsoon-tests)
 
+(defun rightmost-bit-index (n)
+  "used just in testing"
+  (declare (type fixnum n))
+  (bit-scan-forward n))
+
 (5am:test :test-bit-scan-forward
-  (5am:is (eql 0 (bit-scan-forward #b1)))
-  (5am:is (eql 2 (bit-scan-forward #b100)))
-  (5am:is (eql 2 (bit-scan-forward #b11011100))))
+  (5am:is (eql 0 (rightmost-bit-index #b1)))
+  (5am:is (eql 2 (rightmost-bit-index #b100)))
+  (5am:is (eql 2 (rightmost-bit-index #b11011100))))
 
 (5am:test :test-skip-whitespace
   (5am:is (eql 0 (skip-whitespace "a" 0)))
-  (5am:is (null (skip-whitespace " " 0))
+  (5am:is (eql 1 (skip-whitespace " " 0))
           "No non-whitespace characters found")
   (5am:is (eql 2 (skip-whitespace "  a   " 0))
           "Bitmask is reversed & leading zeroes are ommitted."))
