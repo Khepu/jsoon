@@ -246,7 +246,6 @@ first character after the escaped sequence."
                   do (error 'unmatched-string-delimiter :starting-position (1- index))
                      ;; `next-' prefix essentially means offset from `current-index'
                 collect (progn
-                          (format nil "current-index: ~a~%" current-index)
                           (setf chunk (chunk string current-index))
                           (let* ((chunk (pack chunk))
                                  (double-quote-bitmap (chunk=->bm chunk +double-quote+))
