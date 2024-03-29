@@ -9,14 +9,14 @@
 
 (defconstant +chunk-length+ (the fixnum 16))
 
-(define-symbol-macro +space+        (sb-simd-sse4.2:u8.16 (char-code #\space)))
-(define-symbol-macro +tab+          (sb-simd-sse4.2:u8.16 (char-code #\tab)))
-(define-symbol-macro +newline+      (sb-simd-sse4.2:u8.16 (char-code #\newline)))
-(define-symbol-macro +double-quote+ (sb-simd-sse4.2:u8.16 (char-code #\")))
-(define-symbol-macro +backslash+    (sb-simd-sse4.2:u8.16 (char-code #\\)))
-(define-symbol-macro +comma+        (sb-simd-sse4.2:u8.16 (char-code #\,)))
-(define-symbol-macro +closing-bracket+ (sb-simd-sse4.2:u8.16 (char-code #\])))
-(define-symbol-macro +closing-brace+   (sb-simd-sse4.2:u8.16 (char-code #\})))
+(define-symbol-macro +space+        (sb-simd-avx2:u8.16 (char-code #\space)))
+(define-symbol-macro +tab+          (sb-simd-avx2:u8.16 (char-code #\tab)))
+(define-symbol-macro +newline+      (sb-simd-avx2:u8.16 (char-code #\newline)))
+(define-symbol-macro +double-quote+ (sb-simd-avx2:u8.16 (char-code #\")))
+(define-symbol-macro +backslash+    (sb-simd-avx2:u8.16 (char-code #\\)))
+(define-symbol-macro +comma+        (sb-simd-avx2:u8.16 (char-code #\,)))
+(define-symbol-macro +closing-bracket+ (sb-simd-avx2:u8.16 (char-code #\])))
+(define-symbol-macro +closing-brace+   (sb-simd-avx2:u8.16 (char-code #\})))
 
 (deftype string-chunk ()
   `(array (unsigned-byte 8) (,+chunk-length+)))
@@ -44,25 +44,24 @@
                  not-whitespace-p %parse-number))
 
 (defmacro chunk= (chunk value)
-  `(let ((value-mask (sb-simd-sse4.2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
+  `(let ((value-mask (sb-simd-avx2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
                                             (the (sb-ext:simd-pack (unsigned-byte 8)) ,value))))
      (declare (type (sb-ext:simd-pack (unsigned-byte 8)) value-mask))
      value-mask))
 
 (defmacro chunk=->bm (chunk value)
   "Compare chunks and convert to bitmap"
-  `(sb-simd-sse4.2:u8.16-movemask (chunk= ,chunk ,value)))
+  `(sb-simd-avx2:u8.16-movemask (chunk= ,chunk ,value)))
 
 (defmacro chunk/= (chunk value)
-  `(let ((value-mask (sb-simd-sse4.2:u8.16-not
-                      (sb-simd-sse4.2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
-                                             (the (sb-ext:simd-pack (unsigned-byte 8)) ,value)))))
+  `(let ((value-mask (sb-simd-avx2:u8.16/= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
+                                           (the (sb-ext:simd-pack (unsigned-byte 8)) ,value))))
      (declare (type (sb-ext:simd-pack (unsigned-byte 8)) value-mask))
      value-mask))
 
 (defmacro pack (chunk)
   `(the (sb-ext:simd-pack (unsigned-byte 8))
-        (sb-simd-sse4.2:u8.16-aref (the string-chunk ,chunk) 0)))
+        (sb-simd-avx2:u8.16-aref (the string-chunk ,chunk) 0)))
 
 (defun rightmost-bit (n)
   (declare (type fixnum n))
@@ -111,11 +110,11 @@
                     (tab-mask     (chunk/= chunk +tab+))
                     (newline-mask (chunk/= chunk +newline+))
                     ;; Equality checks with simd will produce unsigned results of the same length
-                    (whitespace-pack (sb-simd-sse4.2:u8.16-and space-mask
+                    (whitespace-pack (sb-simd-avx2:u8.16-and space-mask
                                                                tab-mask
                                                                newline-mask))
                     ;; The produced mask is backwards
-                    (whitespace-bitmap (sb-simd-sse4.2:u8.16-movemask whitespace-pack)))
+                    (whitespace-bitmap (sb-simd-avx2:u8.16-movemask whitespace-pack)))
                (declare (type fixnum whitespace-bitmap))
                (if (zerop whitespace-bitmap)
                    (incf index +chunk-length+)
