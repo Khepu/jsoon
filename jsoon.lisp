@@ -65,7 +65,7 @@
 
 (defun unset-rightmost-bit (n)
   (declare (type fixnum n))
-  (the fixnum (logxor n (- n 1))))
+  (the fixnum (logand n (- n 1))))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
