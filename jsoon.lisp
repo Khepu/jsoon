@@ -38,7 +38,7 @@
                      (value condition)
                      (index condition)))))
 
-(declaim (inline rightmost-bit unset-rightmost-bit chunk
+(declaim (inline unset-rightmost-bit chunk
                  %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char
                  skip-to-next-character %parse-decimal-segment %parse-exponent-segment
                  not-whitespace-p %parse-number))
@@ -63,14 +63,9 @@
   `(the (sb-ext:simd-pack (unsigned-byte 8))
         (sb-simd-avx2:u8.16-aref (the string-chunk ,chunk) 0)))
 
-(defun rightmost-bit (n)
-  (declare (type fixnum n))
-  (the fixnum (logand (1+ (lognot n))
-                      n)))
-
 (defun unset-rightmost-bit (n)
   (declare (type fixnum n))
-  (logxor n (rightmost-bit n)))
+  (the fixnum (logxor n (- n 1))))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
