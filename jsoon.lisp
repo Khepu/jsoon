@@ -18,6 +18,8 @@
 (define-symbol-macro +closing-bracket+ (sb-simd-avx2:u8.16 (char-code #\])))
 (define-symbol-macro +closing-brace+   (sb-simd-avx2:u8.16 (char-code #\})))
 
+(sb-ext:define-hash-table-test string= sxhash)
+
 (deftype string-chunk ()
   `(array (unsigned-byte 8) (,+chunk-length+)))
 
@@ -40,12 +42,12 @@
 
 (declaim (inline unset-rightmost-bit chunk
                  %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char
-                 skip-to-next-character %parse-decimal-segment %parse-exponent-segment
-                 not-whitespace-p %parse-number))
+                 skip-whitespace skip-to-next-character %parse-decimal-segment %parse-exponent-segment
+                 not-whitespace-p %parse-number %parse-string %parse-array %parse-object))
 
 (defmacro chunk= (chunk value)
   `(let ((value-mask (sb-simd-avx2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
-                                            (the (sb-ext:simd-pack (unsigned-byte 8)) ,value))))
+                                          (the (sb-ext:simd-pack (unsigned-byte 8)) ,value))))
      (declare (type (sb-ext:simd-pack (unsigned-byte 8)) value-mask))
      value-mask))
 
@@ -71,7 +73,7 @@
   (declare (type simple-string string)
            (type fixnum index)
            (type character pad-character)
-           (optimize (speed 3) (safety 0) (compilation-speed 0)))
+           (optimize (speed 3) (safety 0) (compilation-speed 0) (debug 0)))
   (let ((chunk (make-array (list +chunk-length+)
                            :element-type '(unsigned-byte 8)
                            :initial-element (char-code pad-character))))
@@ -94,28 +96,32 @@
   "Skips to the first non-whitespace character."
   (declare (type simple-string string)
            (type fixnum index))
-  (loop with string-length = (length string)
-        if (< index string-length)
-          do ;; Padding with a spaces to make detection of chunks with just whitespace
-             ;; easier when they are less than `+chunk-length+'.
-             (let* ((chunk (chunk string index #\space))
-                    ;; Packing here instead of inside `chunk' to avoid pointer coercion
-                    (chunk (pack chunk))
-                    (space-mask   (chunk/= chunk +space+))
-                    (tab-mask     (chunk/= chunk +tab+))
-                    (newline-mask (chunk/= chunk +newline+))
-                    ;; Equality checks with simd will produce unsigned results of the same length
-                    (whitespace-pack (sb-simd-avx2:u8.16-and space-mask
-                                                               tab-mask
-                                                               newline-mask))
-                    ;; The produced mask is backwards
-                    (whitespace-bitmap (sb-simd-avx2:u8.16-movemask whitespace-pack)))
-               (declare (type fixnum whitespace-bitmap))
-               (if (zerop whitespace-bitmap)
-                   (incf index +chunk-length+)
-                   (return (incf index (bit-scan-forward whitespace-bitmap)))))
-        else
-          do (return string-length)))
+  (let ((chunk nil))
+    (declare (dynamic-extent chunk)
+             (type (or null string-chunk) chunk))
+    (loop with string-length = (length string)
+          if (< index string-length)
+            do ;; Padding with a spaces to make detection of chunks with just whitespace
+               ;; easier when they are less than `+chunk-length+'.
+               (progn
+                 (setq chunk (chunk string index #\space))
+                 (let* (;; Packing here instead of inside `chunk' to avoid pointer coercion
+                        (chunk (pack chunk))
+                        (space-mask   (chunk/= chunk +space+))
+                        (tab-mask     (chunk/= chunk +tab+))
+                        (newline-mask (chunk/= chunk +newline+))
+                        ;; Equality checks with simd will produce unsigned results of the same length
+                        (whitespace-pack (sb-simd-avx2:u8.16-and space-mask
+                                                                 tab-mask
+                                                                 newline-mask))
+                        ;; The produced mask is backwards
+                        (whitespace-bitmap (sb-simd-avx2:u8.16-movemask whitespace-pack)))
+                   (declare (type fixnum whitespace-bitmap))
+                   (if (zerop whitespace-bitmap)
+                       (incf index +chunk-length+)
+                       (return (incf index (bit-scan-forward whitespace-bitmap))))))
+          else
+            do (return string-length))))
 
 (defun not-whitespace-p (character)
   (declare (type character character)
@@ -128,8 +134,8 @@
   (declare (type simple-string string)
            (type fixnum index))
   (cond
-    ((not-whitespace-p (schar string index))        index)
-    ((not-whitespace-p (schar string (incf index))) index)
+    ((not-whitespace-p (char string index))        index)
+    ((not-whitespace-p (char string (incf index))) index)
     (t (skip-whitespace string (incf index)))))
 
 (defun high-surrogate-p (code-value)
@@ -222,34 +228,31 @@ first character after the escaped sequence."
                       next-backslash (next-offset backslash-bitmap)))))
    current-index))
 
-
 (defun %parse-string (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (incf index)
-  (when (char= #\" (char string index))
+  (when (char= #\" (char string (incf index)))
     (return-from %parse-string (values "" index)))
   (let ((current-index index)
         (substrings nil)
-        (chunk))
-    (declare (type fixnum current-index)
+        (chunk nil)
+        (done nil)
+        (raw-string-length (length string)))
+    (declare (type fixnum current-index raw-string-length)
+             (type (or null string-chunk) chunk)
              (dynamic-extent chunk substrings))
     (setf substrings
-          (loop with done = nil
-                with raw-string-length = (length string)
-                when (>= current-index raw-string-length)
+          (loop when (>= current-index raw-string-length)
                   do (error 'unmatched-string-delimiter :starting-position (1- index))
                      ;; `next-' prefix essentially means offset from `current-index'
                 collect (progn
-                          (setf chunk (chunk string current-index))
+                          (setq chunk (chunk string current-index))
                           (let* ((chunk (pack chunk))
                                  (double-quote-bitmap (chunk=->bm chunk +double-quote+))
                                  (next-double-quote (next-offset (the fixnum double-quote-bitmap)))
                                  (backslash-bitmap   (chunk=->bm chunk +backslash+))
                                  (next-backslash (next-offset (the fixnum backslash-bitmap))))
-                            (declare (type (or null fixnum) next-double-quote next-backslash)
-                                     (dynamic-extent next-double-quote next-backslash chunk
-                                                     double-quote-bitmap backslash-bitmap))
+                            (declare (type (or null fixnum) next-double-quote next-backslash))
                             (cond
                               ;; the end of the string is known and no escaping is needed
                               ((and next-double-quote
@@ -260,7 +263,7 @@ first character after the escaped sequence."
                                            current-index
                                            (incf current-index next-double-quote))
                                  (incf current-index)
-                                 (setf done t)))
+                                 (setq done t)))
 
                               ;; no string delimiter found and nothing to unescape, move forward
                               ((and (not next-double-quote) (not next-backslash))
@@ -283,7 +286,7 @@ first character after the escaped sequence."
                 when done
                 do (loop-finish)))
     (values
-     (if (> (length substrings) 1)
+     (if (consp substrings)
          (apply #'concatenate 'string substrings)
          (car substrings))
      current-index)))
@@ -304,8 +307,7 @@ first character after the escaped sequence."
            (type fixnum index integer))
   (multiple-value-bind (decimal current-index)
       (parse-integer string :start index :junk-allowed t)
-    (declare (type fixnum decimal current-index)
-             (dynamic-extent decimal))
+    (declare (type fixnum decimal current-index))
     (let ((number (+ integer (/ decimal (expt 10.0d0 (- current-index index))))))
       (declare (type double-float number))
       (if (and current-index (char= #\e (char string current-index)))
@@ -335,7 +337,7 @@ first character after the escaped sequence."
   (declare (type simple-string string)
            (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index)))
-        (parsed-object (make-hash-table :test 'equal
+        (parsed-object (make-hash-table :test 'string=
                                         :size 10
                                         :rehash-size 2
                                         :rehash-threshold 1)))
@@ -358,8 +360,7 @@ first character after the escaped sequence."
                  (setf current-index (skip-to-next-character string new-index)
                        (gethash parsed-key parsed-object) parsed-value)
                  (let ((character (char string current-index)))
-                   (declare (dynamic-extent character)
-                            (type character character))
+                   (declare (type character character))
                    (cond
                      ((char= #\} character) (loop-finish))
                      ((char/= #\, character) (error "Expected ',' after object value. Instead found ~a at position ~a!"
@@ -382,8 +383,7 @@ first character after the escaped sequence."
                      (setf current-index (skip-to-next-character string new-index))
                      parsed-element)
            do (let ((character (char string current-index)))
-                (declare (dynamic-extent character)
-                         (type character character))
+                (declare (type character character))
                 (cond
                   ((char= character #\]) (loop-finish))
                   ((char= character #\,) (incf current-index))
@@ -406,8 +406,7 @@ first character after the escaped sequence."
                     (skip-to-next-character string index)
                     index))
          (character (char string index)))
-    (declare (dynamic-extent character)
-             (type character character))
+    (declare (type character character))
     (cond
       ((char= character #\{) (%parse-object string index))
       ((char= character #\[) (%parse-array string index))
