@@ -18,14 +18,12 @@
 (define-symbol-macro +closing-bracket+ (sb-simd-avx2:u8.16 (char-code #\])))
 (define-symbol-macro +closing-brace+   (sb-simd-avx2:u8.16 (char-code #\})))
 
-(sb-ext:define-hash-table-test string= sxhash)
-
 (deftype string-chunk ()
   `(simple-array (unsigned-byte 8) (,+chunk-length+)))
 
 (defstruct context
   (string "" :type simple-string)
-  (index 0 :type fixnum)
+  (index  0  :type fixnum)
   (buffer (make-array (list +chunk-length+) :element-type '(unsigned-byte 8)) :type string-chunk))
 
 (defmacro with-context ((&rest slots) instance &body body)
@@ -57,7 +55,7 @@
 (declaim (inline unset-rightmost-bit chunk
                  %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char
                  skip-whitespace skip-to-next-character %parse-decimal-segment
-                 not-whitespace-p %parse-number %parse-array %parse-object))
+                 not-whitespace-p %parse-number %parse-array %parse-object %parse-string))
 
 (defmacro chunk= (chunk value)
   `(let ((value-mask (sb-simd-avx2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
