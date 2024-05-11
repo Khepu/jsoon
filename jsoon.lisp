@@ -65,8 +65,9 @@
         (sb-simd-avx2:u8.16-aref (the string-chunk ,chunk) 0)))
 
 (defun unset-rightmost-bit (n)
-  (declare (type fixnum n))
-  (the fixnum (logand n (- n 1))))
+  (declare (type fixnum n)
+           (optimize (speed 3) (safety 0)))
+  (unset-rightmost-bit n))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
@@ -195,7 +196,7 @@ first character after the escaped sequence."
                          backslash-bitmap
                          next-backslash)
   (declare (type simple-string string)
-           (type fixnum current-index)
+           (type fixnum current-index double-quote-bitmap backslash-bitmap)
            (type (or null fixnum) next-double-quote next-backslash))
   (values
    (with-output-to-string (parsed-string)
@@ -248,9 +249,9 @@ first character after the escaped sequence."
                           (setq chunk (chunk string current-index))
                           (let* ((chunk (pack chunk))
                                  (double-quote-bitmap (chunk=->bm chunk +double-quote+))
-                                 (next-double-quote (next-offset (the fixnum double-quote-bitmap)))
-                                 (backslash-bitmap   (chunk=->bm chunk +backslash+))
-                                 (next-backslash (next-offset (the fixnum backslash-bitmap))))
+                                 (next-double-quote   (next-offset (the fixnum double-quote-bitmap)))
+                                 (backslash-bitmap    (chunk=->bm chunk +backslash+))
+                                 (next-backslash      (next-offset (the fixnum backslash-bitmap))))
                             (declare (type (or null fixnum) next-double-quote next-backslash))
                             (cond
                               ;; the end of the string is known and no escaping is needed
@@ -336,7 +337,7 @@ first character after the escaped sequence."
   (declare (type simple-string string)
            (type fixnum index))
   (let ((current-index (skip-to-next-character string (1+ index)))
-        (parsed-object (make-hash-table :test 'string=
+        (parsed-object (make-hash-table :test 'equal
                                         :size 10
                                         :rehash-size 2
                                         :rehash-threshold 1)))
@@ -361,10 +362,13 @@ first character after the escaped sequence."
                  (let ((character (char string current-index)))
                    (declare (type character character))
                    (cond
-                     ((char= #\} character) (loop-finish))
-                     ((char/= #\, character) (error "Expected ',' after object value. Instead found ~a at position ~a!"
-                                                    character current-index))
-                     (t (setf current-index (skip-to-next-character string (incf current-index)))))))))
+                     ((char= #\} character)
+                      (loop-finish))
+                     ((char/= #\, character)
+                      (error "Expected ',' after object value. Instead found ~a at position ~a!"
+                             character current-index))
+                     (t
+                      (setf current-index (skip-to-next-character string (incf current-index)))))))))
     (values parsed-object (incf current-index))))
 
 (defun %parse-array (string index)
