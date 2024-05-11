@@ -38,11 +38,10 @@
                      (value condition)
                      (index condition)))))
 
-(declaim (inline unset-rightmost-bit chunk
+(declaim (inline chunk unset-rightmost-bit
                  %unescape-char next-offset high-surrogate-p %parse-surrogate surrogate-char
                  skip-whitespace skip-to-next-character %parse-decimal-segment
                  not-whitespace-p %parse-number %parse-array %parse-object %parse-string))
-
 
 (defmacro chunk= (chunk value)
   `(let ((value-mask (sb-simd-avx2:u8.16= (the (sb-ext:simd-pack (unsigned-byte 8)) ,chunk)
@@ -67,7 +66,7 @@
 (defun unset-rightmost-bit (n)
   (declare (type fixnum n)
            (optimize (speed 3) (safety 0)))
-  (unset-rightmost-bit n))
+  (%unset-rightmost-bit n))
 
 (defun chunk (string index &optional (pad-character #\Nul))
   (declare (type simple-string string)
@@ -336,40 +335,40 @@ first character after the escaped sequence."
 (defun %parse-object (string index)
   (declare (type simple-string string)
            (type fixnum index))
-  (let ((current-index (skip-to-next-character string (1+ index)))
-        (parsed-object (make-hash-table :test 'equal
-                                        :size 10
-                                        :rehash-size 2
-                                        :rehash-threshold 1)))
+  (let ((current-index (skip-to-next-character string (1+ index))))
     (declare (type fixnum current-index))
     ;; empty object check
     (when (char= (char string current-index) #\})
-      (return-from %parse-object (values parsed-object current-index)))
-    (loop with raw-string-length = (length string)
-          while (< current-index raw-string-length)
+      (return-from %parse-object (values nil current-index)))
+    (values
+     (loop with raw-string-length = (length string)
+           with done-p = nil
+           while (< current-index raw-string-length)
           when (char/= #\" (char string current-index))
             do (error "Key not of type string at  position ~a!" current-index)
-          do (multiple-value-bind (parsed-key new-index)
-                 (%parse-string string current-index)
-               (setf current-index (skip-to-next-character string new-index))
-               (if (char= #\: (char string current-index))
-                   (incf current-index)
-                   (error "Missing ':' after key '~a' at position ~a!" parsed-key current-index))
-               (multiple-value-bind (parsed-value new-index)
-                   (parse string current-index)
-                 (setf current-index (skip-to-next-character string new-index)
-                       (gethash parsed-key parsed-object) parsed-value)
-                 (let ((character (char string current-index)))
-                   (declare (type character character))
-                   (cond
-                     ((char= #\} character)
-                      (loop-finish))
-                     ((char/= #\, character)
-                      (error "Expected ',' after object value. Instead found ~a at position ~a!"
-                             character current-index))
-                     (t
-                      (setf current-index (skip-to-next-character string (incf current-index)))))))))
-    (values parsed-object (incf current-index))))
+          collect (multiple-value-bind (parsed-key new-index)
+                      (%parse-string string current-index)
+                    (setf current-index (skip-to-next-character string new-index))
+                    (if (char= #\: (char string current-index))
+                        (incf current-index)
+                        (error "Missing ':' after key '~a' at position ~a!" parsed-key current-index))
+                    (multiple-value-bind (parsed-value new-index)
+                        (parse string current-index)
+                      (setf current-index (skip-to-next-character string new-index))
+                      (let ((character (char string current-index)))
+                        (declare (type character character))
+                        (cond
+                          ((char= #\} character)
+                           (setf done-p t))
+                          ((char/= #\, character)
+                           (error "Expected ',' after object value. Instead found ~a at position ~a!"
+                                  character current-index))
+                          (t
+                           (setf current-index (skip-to-next-character string (incf current-index)))))
+                        (cons parsed-key parsed-value))))
+           when done-p
+           do (loop-finish))
+     (incf current-index))))
 
 (defun %parse-array (string index)
   (declare (type simple-string string)
