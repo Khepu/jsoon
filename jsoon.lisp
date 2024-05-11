@@ -342,10 +342,9 @@ first character after the escaped sequence."
       (return-from %parse-object (values nil current-index)))
     (values
      (loop with raw-string-length = (length string)
-           with done-p = nil
            while (< current-index raw-string-length)
            when (char/= #\" (char string current-index))
-             do (error "Key not of type string at  position ~a!" current-index)
+             do (error "Key not of type string at position ~a!" current-index)
            collect (multiple-value-bind (parsed-key new-index)
                        (%parse-string string current-index)
                      (setf current-index (skip-to-next-character string new-index))
@@ -355,19 +354,17 @@ first character after the escaped sequence."
                      (multiple-value-bind (parsed-value new-index)
                          (parse string current-index)
                        (setf current-index (skip-to-next-character string new-index))
-                       (let ((character (char string current-index)))
-                         (declare (type character character))
-                         (cond
-                           ((char= #\} character)
-                            (setf done-p t))
-                           ((char/= #\, character)
-                            (error "Expected ',' after object value. Instead found ~a at position ~a!"
-                                   character current-index))
-                           (t
-                            (setf current-index (skip-to-next-character string (incf current-index)))))
-                         (cons parsed-key parsed-value))))
-           when done-p
-           do (loop-finish))
+                       (cons parsed-key parsed-value)))
+           do (let ((character (char string current-index)))
+                (declare (type character character))
+                (cond
+                  ((char= #\} character)
+                   (loop-finish))
+                  ((char/= #\, character)
+                   (error "Expected ',' after object value. Instead found ~a at position ~a!"
+                          character current-index))
+                  (t
+                   (setf current-index (skip-to-next-character string (incf current-index)))))))
      (incf current-index))))
 
 (defun %parse-array (string index)
