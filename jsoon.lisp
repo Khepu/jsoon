@@ -124,10 +124,10 @@
 
 (defun not-whitespace-p (character)
   (declare (type character character)
-           (optimize (speed 3) (safety 0)))
-  (not (or (char= character #\space)
-           (char= character #\tab)
-           (char= character #\newline))))
+           (optimize (speed 3) (safety 0) (debug 0)))
+  (and (char/= character #\space)
+       (char/= character #\newline)
+       (char/= character #\tab)))
 
 (defun skip-to-next-character (string index)
   (declare (type simple-string string)

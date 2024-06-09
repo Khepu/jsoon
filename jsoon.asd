@@ -6,4 +6,5 @@
   :serial t
   :components ((:file "package")
                (:file "abm-vops")
+               (:file "inst")
                (:file "jsoon")))
