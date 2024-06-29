@@ -5,8 +5,6 @@
 
 (defparameter *data* (uiop:read-file-string "./10mb.json"))
 
-(defparameter *mock* "   {  \"my-data\":  123}")
-
 (defconstant +chunk-length+ (the fixnum 16))
 
 (define-symbol-macro +space+        (sb-simd-avx2:u8.16 (char-code #\space)))
@@ -14,9 +12,6 @@
 (define-symbol-macro +newline+      (sb-simd-avx2:u8.16 (char-code #\newline)))
 (define-symbol-macro +double-quote+ (sb-simd-avx2:u8.16 (char-code #\")))
 (define-symbol-macro +backslash+    (sb-simd-avx2:u8.16 (char-code #\\)))
-(define-symbol-macro +comma+        (sb-simd-avx2:u8.16 (char-code #\,)))
-(define-symbol-macro +closing-bracket+ (sb-simd-avx2:u8.16 (char-code #\])))
-(define-symbol-macro +closing-brace+   (sb-simd-avx2:u8.16 (char-code #\})))
 
 (deftype string-chunk ()
   `(simple-array (unsigned-byte 8) (,+chunk-length+)))
@@ -498,3 +493,7 @@ first character after the escaped sequence."
              (%parse-number "1.2e2" 0)))
   (5am:is (= 1.2d0
              (%parse-number "120.0e-2" 0))))
+
+(5am:test :test-%parse-object
+  (5am:is (equal '(("test" . 123)))
+          (%parse-object "{\"test\"   :    123}")))
