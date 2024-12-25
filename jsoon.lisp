@@ -399,7 +399,7 @@ first character after the escaped sequence."
   (if (and (char= #\r (char string (1+ index)))
            (char= #\u (char string (+ index 2)))
            (char= #\e (char string (+ index 3))))
-      (values nil (incf index 4))
+      (values t (incf index 4))
       (error "Expected 'true' at position ~a!" index)))
 
 (defun %parse-false (string index)
